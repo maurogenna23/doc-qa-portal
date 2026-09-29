@@ -1,4 +1,3 @@
-import { createJsonLogger } from './adapters/logger.js';
 import {
   createOpenAIClient,
   OpenAICompletionProvider,
@@ -6,14 +5,13 @@ import {
 } from './adapters/openai.js';
 import { createPineconeIndex, PineconeVectorStore } from './adapters/pinecone.js';
 import { loadConfig, type AppConfig } from './config.js';
-import type { CompletionProvider, EmbeddingProvider, Logger, VectorStore } from './core/ports.js';
+import type { CompletionProvider, EmbeddingProvider, VectorStore } from './core/ports.js';
 
 export interface Container {
   config: AppConfig;
   embeddings: EmbeddingProvider;
   completions: CompletionProvider;
   store: VectorStore;
-  logger: Logger;
 }
 
 export function buildContainer(config: AppConfig = loadConfig()): Container {
@@ -37,7 +35,6 @@ export function buildContainer(config: AppConfig = loadConfig()): Container {
     }),
     completions: new OpenAICompletionProvider({ client: openai, model: config.llm.completionModel }),
     store: new PineconeVectorStore(index),
-    logger: createJsonLogger({ service: 'doc-qa' }),
   };
 }
 

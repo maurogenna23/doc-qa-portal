@@ -56,9 +56,12 @@ function numeric(env: Env, key: string, fallback: number, problems: string[]): n
 }
 
 /**
- * Reads configuration once, at cold start, and fails immediately when something
- * is missing. A Lambda that boots misconfigured and only discovers it on the
- * first request turns a deploy mistake into an intermittent 500.
+ * Reads configuration and reports everything that is wrong at once, by name.
+ *
+ * It runs on the first invocation of an execution environment and the result is
+ * memoised by the container, so a misconfigured deployment fails on its first
+ * request with a message that names the missing variables, rather than with an
+ * anonymous 500 somewhere deeper in the stack.
  */
 export function loadConfig(env: Env = process.env): AppConfig {
   const missing: string[] = [];

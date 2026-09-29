@@ -1,5 +1,6 @@
 import type { SQSBatchResponse, SQSEvent, SQSHandler } from 'aws-lambda';
 import { fetchStagedDocument, parseIngestJobMessage } from '../adapters/ingestQueue.js';
+import { createJsonLogger } from '../adapters/logger.js';
 import { getContainer } from '../container.js';
 import { describeError } from '../core/errors.js';
 import { ingestDocuments } from '../core/ingest.js';
@@ -16,7 +17,8 @@ import { ingestDocuments } from '../core/ingest.js';
  * documents that already succeeded.
  */
 export const handler: SQSHandler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
-  const { embeddings, store, logger } = getContainer();
+  const logger = createJsonLogger({ service: 'doc-qa', handler: 'ingestWorker' });
+  const { embeddings, store } = getContainer();
   const batchItemFailures: { itemIdentifier: string }[] = [];
 
   for (const record of event.Records) {
