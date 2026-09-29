@@ -314,7 +314,8 @@ Pinecone index and the OpenAI API:
   paragraph. `employee-handbook#chunk-2` was confirmed gone from Pinecone, no
   duplicate was created, the question that chunk used to answer now returns the
   refusal, and the text that survived the edit still answers.
-- **The web app**, driven through the browser for both pages.
+- **The web app**, driven through the browser: a document added on `/docs` was
+  then answerable on `/` with that document as its only source.
 - **A missing API key**, which returns `CONFIGURATION_ERROR` naming the variable.
 
 The stack was synthesised in both `sync` and `async` modes, and the generated

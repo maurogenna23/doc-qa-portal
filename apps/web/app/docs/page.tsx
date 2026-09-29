@@ -1,7 +1,7 @@
 'use client';
 
 import type { IngestDocumentInput, IngestResponse } from '@docqa/contracts';
-import { useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent } from 'react';
 import { ingestDocuments } from '@/lib/api';
 import { ErrorNotice } from '../error-notice';
 
@@ -10,8 +10,15 @@ interface DocumentDraft extends IngestDocumentInput {
   key: string;
 }
 
-function emptyDraft(): DocumentDraft {
-  return { key: crypto.randomUUID(), id: '', title: '', content: '' };
+/**
+ * Card keys are derived from React's useId rather than crypto.randomUUID.
+ *
+ * A random id is generated once during the server render and again during
+ * hydration, so the `id`/`htmlFor` pair on every field disagreed between the two
+ * and React reported a hydration mismatch. useId is stable across both.
+ */
+function emptyDraft(key: string): DocumentDraft {
+  return { key, id: '', title: '', content: '' };
 }
 
 function summarise(result: IngestResponse): string {
@@ -22,10 +29,15 @@ function summarise(result: IngestResponse): string {
 }
 
 export default function DocumentsPage() {
-  const [drafts, setDrafts] = useState<DocumentDraft[]>([emptyDraft()]);
+  const baseId = useId();
+  // Cards added after the first exist only on the client, so a counter is safe.
+  const nextCard = useRef(1);
+  const [drafts, setDrafts] = useState<DocumentDraft[]>(() => [emptyDraft(`${baseId}-0`)]);
   const [result, setResult] = useState<IngestResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [pending, setPending] = useState(false);
+
+  const addCard = () => emptyDraft(`${baseId}-${nextCard.current++}`);
 
   function update(key: string, field: keyof IngestDocumentInput, value: string) {
     setDrafts((current) =>
@@ -44,7 +56,7 @@ export default function DocumentsPage() {
         drafts.map(({ id, title, content }) => ({ id, title, content })),
       );
       setResult(response);
-      setDrafts([emptyDraft()]);
+      setDrafts([addCard()]);
     } catch (caught) {
       setError(caught);
     } finally {
@@ -129,7 +141,7 @@ export default function DocumentsPage() {
           <button
             type="button"
             className="secondary"
-            onClick={() => setDrafts((current) => [...current, emptyDraft()])}
+            onClick={() => setDrafts((current) => [...current, addCard()])}
           >
             Add another
           </button>
