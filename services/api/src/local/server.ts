@@ -96,9 +96,15 @@ const server = createServer((request, response) => {
     }
 
     if (method !== 'POST' || !isKnownRoute(path)) {
+      // Not an API error: routing is API Gateway's job in a deployment, and it
+      // answers an unknown path itself. Labelling this INVALID_INPUT would
+      // describe the caller's body when the problem is the URL, and would put a
+      // code in a response the deployed API never produces.
       send(response, {
         statusCode: 404,
-        body: JSON.stringify({ error: { code: 'INVALID_INPUT', message: `No route for ${method} ${path}.` } }),
+        body: JSON.stringify({
+          message: `No route for ${method} ${path}. This server exposes POST /ingest, POST /ask and GET /health.`,
+        }),
       });
       return;
     }

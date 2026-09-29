@@ -33,8 +33,13 @@ export const DOC_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
  * escapes it and injects structure into the prompt. The prompt sanitises this
  * too; rejecting it here means a caller learns their input was wrong instead of
  * having it silently rewritten.
+ *
+ * U+2028 and U+2029 are included because they are line breaks in every sense
+ * that matters here, even though they are not C0 control characters. Leaving
+ * them out meant the prompt collapsed them without telling anyone, which is the
+ * silent rewrite this check exists to avoid.
  */
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f\u2028\u2029]/;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -130,7 +135,7 @@ export function parseIngestRequest(body: unknown): IngestDocumentInput[] {
 
     if (title !== null && CONTROL_CHARACTERS.test(title)) {
       problems.push(
-        `documents[${index}].title must be a single line without control characters.`,
+        `documents[${index}].title must be a single line without control or line-separator characters.`,
       );
       return;
     }

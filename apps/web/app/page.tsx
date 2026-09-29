@@ -5,12 +5,31 @@ import { useState, type FormEvent } from 'react';
 import { askQuestion } from '@/lib/api';
 import { ErrorNotice } from './error-notice';
 
+/** Mirrors the API's own limits; the server clamps too. */
+const MIN_TOP_K = 1;
+const MAX_TOP_K = 10;
+const DEFAULT_TOP_K = 3;
+
 export default function AskPage() {
   const [question, setQuestion] = useState('');
-  const [topK, setTopK] = useState(3);
+  // Held as text, not as a number.
+  //
+  // `Number('')` is 0, so clearing the field to retype wrote a 0 the input's own
+  // min={1} then rejected: the browser blocked the submit before onSubmit ever
+  // ran, and the page did nothing at all — no answer, no error, no request.
+  // Range is enforced here and again by the API, not by markup that can veto a
+  // submit silently.
+  const [topK, setTopK] = useState('3');
   const [answer, setAnswer] = useState<AskResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [pending, setPending] = useState(false);
+
+  /** Falls back to the default when the field is empty, and clamps to the API's range. */
+  function resolvedTopK(): number {
+    const parsed = Number.parseInt(topK, 10);
+    if (Number.isNaN(parsed)) return DEFAULT_TOP_K;
+    return Math.min(Math.max(parsed, MIN_TOP_K), MAX_TOP_K);
+  }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -18,8 +37,13 @@ export default function AskPage() {
     setError(null);
     setAnswer(null);
 
+    const effectiveTopK = resolvedTopK();
+    // Show what was actually sent, rather than leaving a value on screen that
+    // does not match the request.
+    setTopK(String(effectiveTopK));
+
     try {
-      setAnswer(await askQuestion({ question, topK }));
+      setAnswer(await askQuestion({ question, topK: effectiveTopK }));
     } catch (caught) {
       setError(caught);
     } finally {
@@ -54,11 +78,14 @@ export default function AskPage() {
           <input
             id="topK"
             type="number"
-            min={1}
-            max={10}
+            inputMode="numeric"
             value={topK}
-            onChange={(event) => setTopK(Number(event.target.value))}
+            onChange={(event) => setTopK(event.target.value)}
+            aria-describedby="topK-hint"
           />
+          <p className="hint" id="topK-hint">
+            Between {MIN_TOP_K} and {MAX_TOP_K}. Defaults to {DEFAULT_TOP_K}.
+          </p>
         </div>
 
         <div className="actions">

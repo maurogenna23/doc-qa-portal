@@ -139,6 +139,7 @@ export async function enqueueDocuments(
   );
 
   const failedToQueue: string[] = [];
+  const queueFailureReasons: string[] = [];
 
   for (const group of batch(messages, SQS_BATCH_LIMIT)) {
     let response;
@@ -170,11 +171,20 @@ export async function enqueueDocuments(
       );
     }
 
-    // A batch call can succeed as a whole while individual entries fail.
+    // A batch call can succeed as a whole while individual entries fail, and
+    // each failure carries its own code and message. Keeping only the id would
+    // put document names in CloudWatch with no reason beside them — the same
+    // loss that was just fixed on the S3 path.
     for (const failure of response.Failed ?? []) {
       const index = Number(failure.Id);
       const message = Number.isInteger(index) ? group[index] : undefined;
-      failedToQueue.push(message?.docId ?? `entry ${failure.Id ?? '?'}`);
+      const docId = message?.docId ?? `entry ${failure.Id ?? '?'}`;
+
+      failedToQueue.push(docId);
+      queueFailureReasons.push(
+        `${docId}: ${failure.Code ?? 'unknown'} ${failure.Message ?? ''}`.trim() +
+          (failure.SenderFault === true ? ' (sender fault)' : ''),
+      );
     }
   }
 
@@ -182,7 +192,7 @@ export async function enqueueDocuments(
     throw new UpstreamError(
       'INGEST_TRANSPORT_ERROR',
       `Failed to enqueue ${failedToQueue.length} of ${documents.length} documents.`,
-      undefined,
+      new Error(queueFailureReasons.join('; ')),
       failedToQueue,
     );
   }

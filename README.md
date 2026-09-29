@@ -48,7 +48,7 @@ services/api
   src/adapters          OpenAI, Pinecone, S3/SQS, logging
   src/handlers          Lambda entry points (ingest, ask, SQS worker)
   src/local             dev server that invokes the real handlers
-  test                  unit tests (141)
+  test                  unit tests (144)
 infra                   AWS CDK stack
 apps/web                Next.js app
 ```
@@ -61,7 +61,7 @@ implements those interfaces against real services.
 
 That boundary buys three concrete things:
 
-1. **The pipeline is testable without a network or an API key.** All 141 tests run
+1. **The pipeline is testable without a network or an API key.** All 144 tests run
    in under a second against in-memory doubles.
 2. **The SQS worker reuses the pipeline unchanged.** Async ingest changes *when*
    the work happens, not *what* the work is, so the bonus cost almost nothing.
@@ -275,7 +275,7 @@ provider text is absent from the body, and that it is present in the log.
 npm test
 ```
 
-141 unit tests, all against in-memory doubles, so they need no credentials and
+144 unit tests, all against in-memory doubles, so they need no credentials and
 cost nothing to run. They cover:
 
 - **chunking** — determinism, sentence-boundary splitting, hard-splitting a
@@ -560,6 +560,13 @@ Measured over three runs each, same corpus and model:
 | Before hardening | 8/8 | **4/10** |
 | After hardening | 8/8 | **7/10** |
 
+Both rows are measured on the same ten cases and the same corpus, changing only
+the prompt; the "before" row runs the pre-hardening prompt reconstructed from
+git. The suite also asserts, before it runs, that each injected payload survives
+prompt assembly intact — an earlier title payload was 145 characters against the
+120-character cap and was cut mid-phrase, so that case passed mechanically and
+measured nothing.
+
 The hardening is four things:
 
 1. Passage text is delimited and declared untrusted rather than interpolated raw.
@@ -572,16 +579,31 @@ The hardening is four things:
    stripped quotes and angle brackets from it but not newlines, so a
    144-character title escaped its own attribute and injected structure into the
    header — hijacking two of three answers, one of them about an unrelated
-   document. Titles carrying control characters are now rejected at the API as
-   well, so a caller learns their input was wrong rather than having it silently
-   rewritten.
+   document. Titles carrying control characters or Unicode line separators are
+   now rejected at the API as well, so a caller learns their input was wrong
+   rather than having it silently rewritten.
+
+   Rendered titles are also **flattened and truncated to 120 characters**. This
+   is separate from the 256 the API accepts: 256 is how much title a caller may
+   store and see returned in `sources`, 120 is how much of it the *model* is
+   shown in an attribution header. A header that grows without limit is surface
+   area, and the title is weak signal next to the chunk text. The truncation is
+   invisible to the user, which is the one part of this that sits awkwardly
+   beside the rejection rule above — it is documented here rather than left for
+   someone to discover.
 
 Point four is the one worth dwelling on. The body was treated as hostile and the
 title was not, because the body is the part that *looks* like content. The lesson
 is not "escape newlines": it is that a field's threat model comes from where it
 is rendered, not from what it is called.
 
-**It is still not a fix.** Three of ten cases get through, consistently. A prompt
+**It is still not a fix, and the denominator moved.** Three of ten cases get
+through, consistently — and they are the *same three* that got through before
+the hardening: the phishing question, the capital-of-France question, and the
+open-ended "what should I do today". The absolute number of hijacks did not
+fall. It went from 5 of 8 to 3 of 10 because two title cases were added that the
+hardening resists, not because any previously-failing case started passing.
+Reading the two tables as progress on the same axis would be reading them wrong. A prompt
 is the wrong layer: the real answers are authenticating `/ingest` so arbitrary
 text cannot enter the corpus, and treating retrieved content as data at a level
 the model cannot be argued out of. Both are beyond what this exercise asked for,
@@ -760,10 +782,16 @@ afterwards.
 have caught eight real defects, not enough to call the prompt validated. They cost
 money to run, so they are a local command rather than part of `npm test`.
 
-**Pinecone is eventually consistent.** A vector is not always queryable the
-instant an upsert returns. It settles in a second or two in practice, and the
-evaluation waits before querying. A production system that ingests and
-immediately asks would need to handle that explicitly.
+**Pinecone is eventually consistent, and by more than it looks.** A vector is
+not queryable the instant an upsert returns. Measured on a fresh namespace,
+writes were still not listable after 16 seconds — an earlier version of this
+paragraph said "a second or two", which was a guess that held for a warm
+namespace and not for a cold one. The evaluation now polls until every seeded
+document is listable rather than sleeping for a fixed interval, because a fixed
+sleep can run a whole suite against a half-populated index and report the result
+as a measurement. A production system that ingests and immediately asks needs to
+handle this explicitly; this one does not, and `/ask` right after `/ingest` can
+legitimately return the refusal.
 
 **Source maps ship with every function.** `NODE_OPTIONS=--enable-source-maps` is
 set so stack traces are readable, which is worth the package size here; a
