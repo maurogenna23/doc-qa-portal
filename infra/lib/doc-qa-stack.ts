@@ -30,6 +30,8 @@ export interface DocQaStackProps extends StackProps {
   /** Steady-state requests per second allowed through the API. */
   rateLimit: number;
   burstLimit: number;
+  /** Ceiling on concurrent ingest workers, and so on concurrent provider calls. */
+  workerConcurrency: number;
 }
 
 const API_SOURCE = path.join(__dirname, '..', '..', 'services', 'api');
@@ -60,13 +62,26 @@ export class DocQaStack extends Stack {
         })
       : undefined;
 
+    // FIFO, because the ingest pipeline is list -> upsert -> delete and those
+    // three steps are not atomic. Two concurrent writes to the same document id
+    // can interleave so that one deletes chunks the other just wrote, leaving a
+    // version that was never submitted. Grouping messages by document id makes
+    // SQS deliver one message group to one consumer at a time, which serialises
+    // writes per document while leaving different documents fully parallel.
+    // A FIFO queue's dead-letter queue must also be FIFO.
     const deadLetterQueue = isAsync
-      ? new Queue(this, 'IngestDeadLetterQueue', { retentionPeriod: Duration.days(14) })
+      ? new Queue(this, 'IngestDeadLetterQueue', {
+          fifo: true,
+          retentionPeriod: Duration.days(14),
+        })
       : undefined;
 
     const ingestQueue =
       isAsync && deadLetterQueue !== undefined
         ? new Queue(this, 'IngestQueue', {
+            fifo: true,
+            // Deduplication ids are supplied explicitly, per job and document.
+            contentBasedDeduplication: false,
             // Six times the worker timeout, the ratio AWS recommends so a slow
             // document is not redelivered while it is still being processed.
             visibilityTimeout: Duration.minutes(30),
@@ -93,14 +108,26 @@ export class DocQaStack extends Stack {
       MIN_SCORE: props.minScore,
       // Keeps the SDK from re-resolving credentials on every warm invocation.
       AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
+      // Without this the bundled .map files are dead weight in every package:
+      // the runtime ships them and never reads them, so stack traces stay
+      // minified while the artefact carries megabytes of unused mapping.
+      NODE_OPTIONS: '--enable-source-maps',
     };
 
     const createFunction = (
       id: string,
       entry: string,
-      options: { timeout: Duration; memorySize: number; environment?: Record<string, string> },
+      options: {
+        timeout: Duration;
+        memorySize: number;
+        environment?: Record<string, string>;
+        reservedConcurrentExecutions?: number;
+      },
     ): NodejsFunction =>
       new NodejsFunction(this, id, {
+        ...(options.reservedConcurrentExecutions === undefined
+          ? {}
+          : { reservedConcurrentExecutions: options.reservedConcurrentExecutions }),
         entry: path.join(API_SOURCE, entry),
         handler: 'handler',
         runtime: Runtime.NODEJS_22_X,
@@ -149,6 +176,11 @@ export class DocQaStack extends Stack {
         timeout: Duration.minutes(5),
         memorySize: 1024,
         environment: { INGEST_MODE: 'sync' },
+        // The throttle on the API caps how fast work is accepted, not how many
+        // workers run at once. Without a reserved ceiling, a burst of queued
+        // documents fans out to as many concurrent Lambdas as the account
+        // allows, and every one of them calls the embedding provider.
+        reservedConcurrentExecutions: props.workerConcurrency,
       });
 
       // Least privilege: the API may only stage and enqueue, the worker may
@@ -160,6 +192,7 @@ export class DocQaStack extends Stack {
 
       ingestWorker.addEventSource(
         new SqsEventSource(ingestQueue, {
+          // FIFO allows at most 10 per batch.
           batchSize: 5,
           // Lets the worker fail one document without forcing SQS to redeliver
           // the whole batch and re-embed what already succeeded.

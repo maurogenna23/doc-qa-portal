@@ -37,6 +37,24 @@ function requiredSetting(name: string): string {
   return value;
 }
 
+/**
+ * Numeric settings are validated here rather than coerced.
+ *
+ * `Number('abc')` is NaN, which CloudFormation serialises as null, so a typo in
+ * API_RATE_LIMIT silently produced a stage with no throttling at all and a
+ * synth that exited 0 — the opposite of the guardrail it was meant to be.
+ */
+function numericSetting(name: string, fallback: number): number {
+  const raw = setting(name);
+  if (raw === undefined) return fallback;
+
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer, received "${raw}".`);
+  }
+  return value;
+}
+
 const rawMode = setting('INGEST_MODE') ?? 'sync';
 if (rawMode !== 'sync' && rawMode !== 'async') {
   throw new Error(`INGEST_MODE must be "sync" or "async", received "${rawMode}".`);
@@ -67,6 +85,7 @@ new DocQaStack(app, 'DocQaStack', {
   maxContextChars: setting('MAX_CONTEXT_CHARS') ?? '8000',
   minScore: setting('MIN_SCORE') ?? '0',
   ingestMode,
-  rateLimit: Number(setting('API_RATE_LIMIT') ?? 10),
-  burstLimit: Number(setting('API_BURST_LIMIT') ?? 20),
+  rateLimit: numericSetting('API_RATE_LIMIT', 10),
+  burstLimit: numericSetting('API_BURST_LIMIT', 20),
+  workerConcurrency: numericSetting('INGEST_WORKER_CONCURRENCY', 5),
 });

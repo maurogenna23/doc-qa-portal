@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IngestResponse } from '@docqa/contracts';
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { enqueueDocument } from '../adapters/ingestQueue.js';
+import { enqueueDocuments } from '../adapters/ingestQueue.js';
 import { createJsonLogger } from '../adapters/logger.js';
 import { getContainer } from '../container.js';
 import { ConfigurationError } from '../core/errors.js';
@@ -33,9 +33,7 @@ export const handler = async (
       }
 
       const jobId = randomUUID();
-      for (const document of documents) {
-        await enqueueDocument(document, { jobId, bucket, queueUrl });
-      }
+      await enqueueDocuments(documents, { jobId, bucket, queueUrl });
 
       logger.info('Queued documents for async ingest.', { jobId, documents: documents.length });
 
