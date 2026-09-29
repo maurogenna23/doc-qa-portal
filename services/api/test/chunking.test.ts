@@ -118,6 +118,52 @@ describe('chunkText', () => {
     expect(chunks.length).toBeLessThan(POLICY.length);
   });
 
+  it('keeps an overlap for sentences too long to leave room for the full one', () => {
+    // Regression guard. The carry used the whole overlap when it fit and none
+    // at all when it did not, so prose made of long sentences — legal and
+    // policy text, the plausible corpus here — chunked with no overlap at all.
+    const options: ChunkingOptions = {
+      maxChunkChars: 800,
+      overlapChars: 150,
+      maxChunksPerDocument: 100,
+    };
+
+    let counter = 0;
+    const sentence = (length: number): string => {
+      const words: string[] = [];
+      while (words.join(' ').length < length - 1) words.push(`w${counter++}`);
+      return `${words.join(' ').slice(0, length - 1)}.`;
+    };
+
+    for (const length of [700, 750, 790]) {
+      counter = 0;
+      const chunks = chunkText([sentence(length), sentence(length), sentence(length)].join(' '), options);
+      expect(chunks.length).toBeGreaterThan(1);
+
+      for (const [position, chunk] of chunks.slice(0, -1).entries()) {
+        const shared = sharedBoundary(chunk.text, chunks[position + 1]!.text);
+        expect(shared.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('never exceeds the chunk size while carrying a partial overlap', () => {
+    const options: ChunkingOptions = {
+      maxChunkChars: 800,
+      overlapChars: 150,
+      maxChunksPerDocument: 100,
+    };
+
+    let counter = 0;
+    const words: string[] = [];
+    while (words.join(' ').length < 4_000) words.push(`word${counter++}`);
+    const text = words.join(' ').replace(/((?:\S+\s){90})/g, '$1. ');
+
+    for (const chunk of chunkText(text, options)) {
+      expect(chunk.text.length).toBeLessThanOrEqual(options.maxChunkChars);
+    }
+  });
+
   it('exposes sane defaults', () => {
     expect(DEFAULT_CHUNKING_OPTIONS.overlapChars).toBeLessThan(
       DEFAULT_CHUNKING_OPTIONS.maxChunkChars / 2,

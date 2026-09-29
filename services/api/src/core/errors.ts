@@ -58,7 +58,10 @@ export class UpstreamError extends AppError {
   constructor(
     code: Extract<
       ApiErrorCode,
-      'EMBEDDING_PROVIDER_ERROR' | 'COMPLETION_PROVIDER_ERROR' | 'VECTOR_STORE_ERROR'
+      | 'EMBEDDING_PROVIDER_ERROR'
+      | 'COMPLETION_PROVIDER_ERROR'
+      | 'VECTOR_STORE_ERROR'
+      | 'INGEST_TRANSPORT_ERROR'
     >,
     message: string,
     cause?: unknown,

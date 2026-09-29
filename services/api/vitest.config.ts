@@ -6,7 +6,7 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     coverage: {
       provider: 'v8',
-      include: ['src/core/**'],
+      include: ['src/core/**', 'src/adapters/**', 'src/http.ts', 'src/config.ts'],
     },
   },
 });

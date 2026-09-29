@@ -107,7 +107,9 @@ export function chunkText(
   }
 
   // Overlap is capped at half a chunk. Beyond that, a chunk could be mostly
-  // repeated text and the splitter would stop making forward progress.
+  // repeated text and the splitter would stop making forward progress. The
+  // realised overlap may still be smaller when a piece nearly fills a chunk;
+  // a piece of exactly maxChunkChars leaves no room for any.
   const overlap = Math.max(0, Math.min(options.overlapChars, Math.floor(maxChunkChars / 2)));
 
   const normalized = normalizeWhitespace(content);
@@ -137,10 +139,16 @@ export function chunkText(
     }
 
     texts.push(buffer);
-    const tail = overlapTail(buffer, overlap);
-    const withOverlap = tail.length > 0 ? `${tail} ${piece}` : piece;
-    // Dropping the overlap is better than emitting an oversized chunk.
-    buffer = withOverlap.length <= maxChunkChars ? withOverlap : piece;
+
+    // Carry as much overlap as still fits beside this piece, rather than the
+    // full overlap or none at all. An earlier version used the whole overlap
+    // when it fit and dropped it entirely when it did not, so any sentence
+    // longer than roughly maxChunkChars - overlapChars produced chunks with no
+    // overlap whatsoever — silently, and precisely for the long-sentence prose
+    // that legal and policy documents are made of.
+    const room = maxChunkChars - piece.length - 1;
+    const tail = room > 0 ? overlapTail(buffer, Math.min(overlap, room)) : '';
+    buffer = tail.length > 0 ? `${tail} ${piece}` : piece;
   }
   if (buffer.length > 0) texts.push(buffer);
 

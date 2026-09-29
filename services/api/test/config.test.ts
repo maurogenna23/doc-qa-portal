@@ -63,6 +63,36 @@ describe('loadConfig', () => {
     );
   });
 
+  it.each([
+    ['MAX_OUTPUT_TOKENS', 'abc'],
+    ['MAX_OUTPUT_TOKENS', '-5'],
+    ['MAX_OUTPUT_TOKENS', '0'],
+    ['MAX_CONTEXT_CHARS', 'eight-thousand'],
+    ['MAX_CONTEXT_CHARS', '-1'],
+    ['MIN_SCORE', 'high'],
+    ['MIN_SCORE', '2'],
+  ])('rejects %s=%s instead of silently falling back to the default', (key, value) => {
+    // Regression guard. These three were read into a `problems` array after the
+    // throw that inspects it, so every one of them was accepted silently and
+    // MAX_OUTPUT_TOKENS=-5 reached the provider as a 502.
+    expect(() => loadConfig({ ...MINIMAL, [key]: value })).toThrow(ConfigurationError);
+  });
+
+  it('accepts the full range of valid guardrail values', () => {
+    const config = loadConfig({
+      ...MINIMAL,
+      MAX_OUTPUT_TOKENS: '1200',
+      MAX_CONTEXT_CHARS: '20000',
+      MIN_SCORE: '0.35',
+    });
+
+    expect(config.guardrails).toEqual({
+      maxOutputTokens: 1200,
+      maxContextChars: 20_000,
+      minScore: 0.35,
+    });
+  });
+
   it('carries the optional namespace and base URL through when set', () => {
     const config = loadConfig({
       ...MINIMAL,

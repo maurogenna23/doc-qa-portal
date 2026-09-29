@@ -6,7 +6,7 @@ import {
   UpstreamError,
   ValidationError,
 } from '../src/core/errors.js';
-import { silentLogger } from '../src/core/ports.js';
+import { silentLogger, type LogFields, type Logger } from '../src/core/ports.js';
 import { errorResponse, parseJsonBody } from '../src/http.js';
 
 function event(body: string | undefined, isBase64Encoded = false): APIGatewayProxyEventV2 {
@@ -41,6 +41,19 @@ describe('parseJsonBody', () => {
     expect(() => parseJsonBody(event(body))).toThrow(ValidationError);
   });
 });
+
+/** Captures what the handler logged, so tests can assert on both sides of the boundary. */
+function recordingLogger(): Logger & { entries: { message: string; fields: LogFields }[] } {
+  const entries: { message: string; fields: LogFields }[] = [];
+  const record = (message: string, fields?: LogFields) => {
+    entries.push({ message, fields: fields ?? {} });
+  };
+  return { entries, info: record, warn: record, error: record };
+}
+
+/** The message a provider SDK produces when it rejects a key: specific, and not ours to publish. */
+const PROVIDER_MESSAGE =
+  'The API key you provided was rejected while calling https://api.pinecone.io/indexes/doc-qa.';
 
 describe('errorResponse', () => {
   it('maps invalid input to 400 and keeps the field details', () => {
@@ -87,5 +100,51 @@ describe('errorResponse', () => {
     const response = errorResponse(new ValidationError('Bad.'), silentLogger);
 
     expect(response.headers?.['Access-Control-Allow-Origin']).toBe('*');
+  });
+});
+
+describe('errorResponse and third-party error text', () => {
+  // Regression guard for a false claim in the README. The Pinecone adapter used
+  // to interpolate the SDK's own message into UpstreamError, and errorResponse
+  // returns `message` verbatim, so a rejected key handed an unauthenticated
+  // caller the index name and the internal endpoint. The earlier test only
+  // exercised the non-AppError branch, so it passed while the property was
+  // false, which is worse than having no test at all.
+
+  it('never returns a provider message to the caller', () => {
+    const error = new UpstreamError(
+      'VECTOR_STORE_ERROR',
+      'Vector store query failed.',
+      new Error(PROVIDER_MESSAGE),
+    );
+
+    const response = errorResponse(error, silentLogger);
+
+    expect(response.body).not.toContain('api.pinecone.io');
+    expect(response.body).not.toContain('rejected');
+    expect(parseBody(response).error.message).toBe('Vector store query failed.');
+  });
+
+  it('does log the provider message, so the detail is not simply lost', () => {
+    const logger = recordingLogger();
+
+    errorResponse(
+      new UpstreamError('VECTOR_STORE_ERROR', 'Vector store query failed.', new Error(PROVIDER_MESSAGE)),
+      logger,
+    );
+
+    const [entry] = logger.entries;
+    expect(entry).toBeDefined();
+    expect(entry!.fields['cause']).toBe(PROVIDER_MESSAGE);
+  });
+
+  it('reports async transport failures under their own code, not the vector store one', () => {
+    const response = errorResponse(
+      new UpstreamError('INGEST_TRANSPORT_ERROR', 'Failed to enqueue document "a".'),
+      silentLogger,
+    );
+
+    expect(response.statusCode).toBe(502);
+    expect(parseBody(response).error.code).toBe('INGEST_TRANSPORT_ERROR');
   });
 });

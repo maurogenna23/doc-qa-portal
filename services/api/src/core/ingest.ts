@@ -108,6 +108,7 @@ export async function ingestDocuments(
     upsertBatchSize = DEFAULT_UPSERT_BATCH_SIZE,
   } = deps;
 
+  let ingestedDocuments = 0;
   let ingestedChunks = 0;
   let totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
@@ -162,6 +163,7 @@ export async function ingestDocuments(
       });
     }
 
+    ingestedDocuments += 1;
     ingestedChunks += records.length;
     logger.info('Ingested document.', {
       docId: document.id,
@@ -171,11 +173,14 @@ export async function ingestDocuments(
   }
 
   logger.info('Ingest complete.', {
-    documents: documents.length,
+    documents: ingestedDocuments,
+    submitted: documents.length,
     chunks: ingestedChunks,
     embeddingModel: embeddings.model,
     embeddingTokens: totalUsage.totalTokens,
   });
 
-  return { ingestedDocuments: documents.length, ingestedChunks };
+  // Counts what was actually indexed, not what was submitted: a document
+  // that produced no chunks was not ingested, whatever the request said.
+  return { ingestedDocuments, ingestedChunks };
 }

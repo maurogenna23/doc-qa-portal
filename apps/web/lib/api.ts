@@ -4,7 +4,7 @@ import type {
   IngestDocumentInput,
   IngestResponse,
 } from '@docqa/contracts';
-import { isApiErrorResponse } from '@docqa/contracts';
+import { isApiErrorResponse, isAskResponse, isIngestResponse } from '@docqa/contracts';
 
 const BASE_URL = (process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:4000').replace(
   /\/$/,
@@ -23,7 +23,7 @@ export class ApiRequestError extends Error {
   }
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+async function post<T>(path: string, body: unknown, isExpected: (value: unknown) => value is T): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${BASE_URL}${path}`, {
@@ -51,15 +51,25 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     throw new ApiRequestError('INTERNAL_ERROR', `Request failed with status ${response.status}.`);
   }
 
-  return payload as T;
+  // A 2xx whose body is not what the contract promises is still a failure, and
+  // surfacing it as one beats returning a value the UI will silently render as
+  // nothing at all.
+  if (!isExpected(payload)) {
+    throw new ApiRequestError(
+      'INTERNAL_ERROR',
+      'The API returned a response that does not match the expected shape.',
+    );
+  }
+
+  return payload;
 }
 
 export function ingestDocuments(documents: IngestDocumentInput[]): Promise<IngestResponse> {
-  return post<IngestResponse>('/ingest', { documents });
+  return post('/ingest', { documents }, isIngestResponse);
 }
 
 export function askQuestion(request: AskRequest): Promise<AskResponse> {
-  return post<AskResponse>('/ask', request);
+  return post('/ask', request, isAskResponse);
 }
 
 export { BASE_URL };

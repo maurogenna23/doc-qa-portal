@@ -72,6 +72,8 @@ export type ApiErrorCode =
   | 'EMBEDDING_PROVIDER_ERROR'
   | 'COMPLETION_PROVIDER_ERROR'
   | 'VECTOR_STORE_ERROR'
+  /** S3 or SQS failed while staging or queueing an async ingest. */
+  | 'INGEST_TRANSPORT_ERROR'
   | 'CONFIGURATION_ERROR'
   | 'INTERNAL_ERROR';
 
@@ -94,4 +96,42 @@ export function isApiErrorResponse(value: unknown): value is ApiErrorResponse {
     'error' in value &&
     typeof (value as ApiErrorResponse).error?.code === 'string'
   );
+}
+
+/**
+ * Response guards.
+ *
+ * The web client used to cast a parsed body straight to the expected type, so a
+ * 200 carrying something unexpected — or nothing parseable — became `null` and
+ * the UI simply stopped, showing neither an answer nor an error.
+ */
+export function isAskResponse(value: unknown): value is AskResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<AskResponse>;
+  return (
+    typeof candidate.answer === 'string' &&
+    Array.isArray(candidate.sources) &&
+    candidate.sources.every(
+      (source) =>
+        typeof source === 'object' &&
+        source !== null &&
+        typeof (source as Source).docId === 'string' &&
+        typeof (source as Source).title === 'string',
+    )
+  );
+}
+
+export function isIngestResponse(value: unknown): value is IngestResponse {
+  if (typeof value !== 'object' || value === null) return false;
+
+  // Read as a plain record: the two members of the union have incompatible
+  // `status` literals, so intersecting them collapses to never.
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate['ingestedDocuments'] !== 'number') return false;
+
+  if (candidate['status'] === 'completed') return typeof candidate['ingestedChunks'] === 'number';
+  if (candidate['status'] === 'queued') {
+    return candidate['ingestedChunks'] === null && typeof candidate['jobId'] === 'string';
+  }
+  return false;
 }

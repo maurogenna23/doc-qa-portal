@@ -1,6 +1,6 @@
 import type { ApiErrorResponse } from '@docqa/contracts';
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { isAppError, ValidationError } from './core/errors.js';
+import { describeError, isAppError, ValidationError } from './core/errors.js';
 import type { Logger } from './core/ports.js';
 
 /**
@@ -51,16 +51,23 @@ export function parseJsonBody(event: APIGatewayProxyEventV2): unknown {
  * Maps a thrown value to a response.
  *
  * Known failures keep their code, status and detail so the caller can act on
- * them. Anything unrecognised becomes a generic 500: an unexpected error may
- * carry a stack trace or a provider payload, which belongs in the log, not in
- * an HTTP response body.
+ * them. Anything unrecognised becomes a generic 500.
+ *
+ * Nothing a third party wrote reaches the body. `message` is always a string
+ * this codebase authored; the provider's own text travels in `cause` and is
+ * logged. An earlier version interpolated the Pinecone SDK's message into the
+ * error, so a rejected API key returned the index name and the internal
+ * endpoint to an unauthenticated caller.
  */
 export function errorResponse(error: unknown, logger: Logger): APIGatewayProxyStructuredResultV2 {
   if (isAppError(error)) {
+    // The cause carries the provider's own message. It belongs in CloudWatch,
+    // which is private, and not in the body, which anyone can read.
     logger.warn('Request failed.', {
       code: error.code,
       statusCode: error.statusCode,
       reason: error.message,
+      ...(error.cause === undefined ? {} : { cause: describeError(error.cause) }),
     });
 
     const body: ApiErrorResponse = {

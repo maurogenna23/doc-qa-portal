@@ -89,6 +89,25 @@ export function loadConfig(env: Env = process.env): AppConfig {
     problems.push('EMBEDDING_DIMENSIONS must be a positive integer.');
   }
 
+  // Every numeric setting is read and range-checked before the throw below.
+  // An earlier version computed these inside the returned object, after the
+  // check, so `numeric` pushed onto a `problems` array nobody read again and
+  // MAX_OUTPUT_TOKENS=-5 was accepted silently.
+  const maxOutputTokens = numeric(env, 'MAX_OUTPUT_TOKENS', 500, problems);
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0) {
+    problems.push('MAX_OUTPUT_TOKENS must be a positive integer.');
+  }
+
+  const maxContextChars = numeric(env, 'MAX_CONTEXT_CHARS', 8_000, problems);
+  if (!Number.isInteger(maxContextChars) || maxContextChars <= 0) {
+    problems.push('MAX_CONTEXT_CHARS must be a positive integer.');
+  }
+
+  const minScore = numeric(env, 'MIN_SCORE', 0, problems);
+  if (!Number.isFinite(minScore) || minScore < -1 || minScore > 1) {
+    problems.push('MIN_SCORE must be a cosine similarity between -1 and 1.');
+  }
+
   if (missing.length > 0 || problems.length > 0) {
     const parts = [
       missing.length > 0 ? `Missing environment variables: ${missing.join(', ')}.` : '',
@@ -110,11 +129,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       embeddingDimensions,
       completionModel: optional(env, 'COMPLETION_MODEL') ?? 'gpt-4.1-mini',
     },
-    guardrails: {
-      maxOutputTokens: numeric(env, 'MAX_OUTPUT_TOKENS', 500, problems),
-      maxContextChars: numeric(env, 'MAX_CONTEXT_CHARS', 8_000, problems),
-      minScore: numeric(env, 'MIN_SCORE', 0, problems),
-    },
+    guardrails: { maxOutputTokens, maxContextChars, minScore },
     ingest: { mode, bucket, queueUrl },
   };
 }

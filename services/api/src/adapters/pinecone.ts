@@ -42,12 +42,13 @@ function toChunkMetadata(raw: RecordMetadata | undefined): ChunkMetadata | null 
   };
 }
 
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /**
  * Pinecone implementation of the VectorStore port.
+ *
+ * Error messages here are written by us and carry no provider text. The SDK's
+ * own message travels in `cause`, which the HTTP layer logs and never returns:
+ * a rejected key produces a message naming the index and the internal endpoint,
+ * and this API is public and unauthenticated.
  *
  * `listIdsByDocId` uses id-prefix listing rather than a metadata filter:
  * serverless indexes do not support delete-by-filter, and prefix listing is
@@ -75,7 +76,7 @@ export class PineconeVectorStore implements VectorStore {
     } catch (error) {
       throw new UpstreamError(
         'VECTOR_STORE_ERROR',
-        `Failed to upsert ${records.length} vectors: ${describe(error)}`,
+        `Failed to upsert ${records.length} vectors.`,
         error,
       );
     }
@@ -100,7 +101,7 @@ export class PineconeVectorStore implements VectorStore {
       }
       return matches;
     } catch (error) {
-      throw new UpstreamError('VECTOR_STORE_ERROR', `Query failed: ${describe(error)}`, error);
+      throw new UpstreamError('VECTOR_STORE_ERROR', 'Vector store query failed.', error);
     }
   }
 
@@ -124,7 +125,7 @@ export class PineconeVectorStore implements VectorStore {
     } catch (error) {
       throw new UpstreamError(
         'VECTOR_STORE_ERROR',
-        `Failed to list existing chunks for document "${docId}": ${describe(error)}`,
+        `Failed to list existing chunks for document "${docId}".`,
         error,
       );
     }
@@ -140,7 +141,7 @@ export class PineconeVectorStore implements VectorStore {
     } catch (error) {
       throw new UpstreamError(
         'VECTOR_STORE_ERROR',
-        `Failed to delete ${ids.length} stale vectors: ${describe(error)}`,
+        `Failed to delete ${ids.length} stale vectors.`,
         error,
       );
     }
