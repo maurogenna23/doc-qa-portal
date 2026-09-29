@@ -1,6 +1,6 @@
 import type { AskResponse } from '@docqa/contracts';
 import { UpstreamError } from './errors.js';
-import { buildPrompt, collectSources, NO_CONTEXT_ANSWER } from './prompt.js';
+import { buildPrompt, collectSources, NO_CONTEXT_ANSWER, parseAnswer } from './prompt.js';
 import {
   silentLogger,
   type CompletionProvider,
@@ -81,7 +81,7 @@ export async function answerQuestion(deps: AskDeps, input: AskInput): Promise<As
     maxOutputTokens,
   });
 
-  const answer = completion.text.trim();
+  const { answer, citedMatches } = parseAnswer(completion.text, prompt.usedMatches);
   if (answer.length === 0) {
     logger.warn('Completion provider returned an empty answer.', { model: completions.model });
     return { answer: NO_CONTEXT_ANSWER, sources: [] };
@@ -90,9 +90,10 @@ export async function answerQuestion(deps: AskDeps, input: AskInput): Promise<As
   logger.info('Answered question.', {
     topK: input.topK,
     retrieved: matches.length,
-    used: prompt.usedMatches.length,
+    shown: prompt.usedMatches.length,
+    cited: citedMatches.length,
     completionModel: completions.model,
-    completionTokens: completion.usage?.totalTokens,
+    totalTokens: completion.usage?.totalTokens,
   });
 
   // A refusal cites nothing: listing sources behind "I don't know" would imply
@@ -101,5 +102,5 @@ export async function answerQuestion(deps: AskDeps, input: AskInput): Promise<As
     return { answer, sources: [] };
   }
 
-  return { answer, sources: collectSources(prompt.usedMatches) };
+  return { answer, sources: collectSources(citedMatches) };
 }

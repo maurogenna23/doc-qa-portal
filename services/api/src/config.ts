@@ -108,7 +108,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       baseUrl: optional(env, 'LLM_BASE_URL'),
       embeddingModel: optional(env, 'EMBEDDING_MODEL') ?? 'text-embedding-3-small',
       embeddingDimensions,
-      completionModel: optional(env, 'COMPLETION_MODEL') ?? 'gpt-4o-mini',
+      completionModel: optional(env, 'COMPLETION_MODEL') ?? 'gpt-4.1-mini',
     },
     guardrails: {
       maxOutputTokens: numeric(env, 'MAX_OUTPUT_TOKENS', 500, problems),

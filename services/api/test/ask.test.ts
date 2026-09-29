@@ -93,7 +93,9 @@ describe('answerQuestion', () => {
     const response = await answerQuestion(
       {
         embeddings: new FakeEmbeddingProvider(),
-        completions: new FakeCompletionProvider(NO_CONTEXT_ANSWER),
+        completions: new FakeCompletionProvider(
+          JSON.stringify({ answer: NO_CONTEXT_ANSWER, citations: [] }),
+        ),
         store: await seededStore(),
       },
       { question: 'What is the CEO salary?', topK: 3 },
@@ -119,6 +121,34 @@ describe('answerQuestion', () => {
     const [request] = completions.requests;
     expect(request).toBeDefined();
     expect(request!.user).toContain(response.sources[0]!.docId);
+  });
+
+  it('cites only the documents the model says it used, not everything retrieved', async () => {
+    // The model is shown several passages and reports using only the first.
+    const completions = new FakeCompletionProvider(
+      JSON.stringify({ answer: 'Digital goods are not refundable.', citations: [1] }),
+    );
+
+    const response = await answerQuestion(
+      { embeddings: new FakeEmbeddingProvider(), completions, store: await seededStore() },
+      { question: 'refund', topK: 10 },
+    );
+
+    expect(response.answer).toBe('Digital goods are not refundable.');
+    expect(response.sources).toHaveLength(1);
+  });
+
+  it('cites nothing when the model reports using no passage', async () => {
+    const completions = new FakeCompletionProvider(
+      JSON.stringify({ answer: 'Nothing here applies.', citations: [] }),
+    );
+
+    const response = await answerQuestion(
+      { embeddings: new FakeEmbeddingProvider(), completions, store: await seededStore() },
+      { question: 'refund', topK: 3 },
+    );
+
+    expect(response.sources).toEqual([]);
   });
 
   it('caps the generated answer length as a cost guardrail', async () => {

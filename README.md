@@ -48,7 +48,7 @@ services/api
   src/adapters          OpenAI, Pinecone, S3/SQS, logging
   src/handlers          Lambda entry points (ingest, ask, SQS worker)
   src/local             dev server that invokes the real handlers
-  test                  unit tests (79)
+  test                  unit tests (93)
 infra                   AWS CDK stack
 apps/web                Next.js app
 ```
@@ -87,7 +87,17 @@ That boundary buys three concrete things:
 
 ### 1. Create the Pinecone index
 
-In the Pinecone console, create an index with:
+```bash
+npm install
+npm run setup:pinecone
+```
+
+The script creates the index if it is missing and verifies it otherwise. Doing
+it in code keeps the index's shape in the repository: the dimension has to match
+the embedding model, which is a fact about the code rather than a value someone
+should have to remember to type into a form.
+
+It creates the equivalent of:
 
 | Setting | Value |
 | --- | --- |
@@ -98,7 +108,8 @@ In the Pinecone console, create an index with:
 
 The dimension is not arbitrary: it is the width of a `text-embedding-3-small`
 vector. A mismatch fails fast with an explicit error rather than writing bad
-vectors — there is a test covering that case.
+vectors — the setup script checks it, and there is a unit test covering the
+runtime path.
 
 Serverless specifically: stale-chunk cleanup lists vectors by id prefix, which
 serverless indexes support. See [Re-ingest without duplicates](#re-ingest-without-duplicates).
@@ -122,7 +133,7 @@ that can disagree.
 | `LLM_BASE_URL` | no | OpenAI | Point at another OpenAI-compatible provider |
 | `EMBEDDING_MODEL` | no | `text-embedding-3-small` | Embedding model |
 | `EMBEDDING_DIMENSIONS` | no | `1536` | Must match the index dimension |
-| `COMPLETION_MODEL` | no | `gpt-4o-mini` | Answering model |
+| `COMPLETION_MODEL` | no | `gpt-4.1-mini` | Answering model |
 | `MAX_OUTPUT_TOKENS` | no | `500` | Ceiling on generated tokens |
 | `MAX_CONTEXT_CHARS` | no | `8000` | Ceiling on retrieved context sent to the LLM |
 | `MIN_SCORE` | no | `0` | Cosine floor for a chunk to be used; `0` disables |
@@ -252,7 +263,7 @@ asserting an API key in an error message cannot leak to the caller.
 npm test
 ```
 
-79 unit tests, all against in-memory doubles, so they need no credentials and
+93 unit tests, all against in-memory doubles, so they need no credentials and
 cost nothing to run. They cover:
 
 - **chunking** — determinism, the overlap invariant across every consecutive
@@ -269,7 +280,46 @@ cost nothing to run. They cover:
 - **configuration** — that a missing variable is reported by name, and that
   async mode refuses to start without its bucket and queue
 
+### Answer-level evaluation
+
+```bash
+npm run eval
+```
+
+Unit tests prove the pipeline is wired correctly. They cannot prove the *prompt*
+works, because the model is not in them. `npm run eval` seeds a fixed corpus into
+its own Pinecone namespace and runs eight questions against the real providers,
+checking two things per case: whether the system answered or refused, and which
+documents it cited.
+
+The cases include paraphrase (a question whose wording does not match the
+passage), a compound question spanning two documents, a question nothing in the
+corpus answers, and a question the model certainly knows but must still refuse
+because it is not in the documents.
+
+It costs a fraction of a cent per run and it caught two real defects that no unit
+test could have — both described under [Prompt design](#prompt-design-was-measured-not-reasoned-about).
+
 ---
+
+### What was verified against the real services
+
+Beyond the test suites, the following was exercised end to end against a live
+Pinecone index and the OpenAI API:
+
+- **Ingest** of three documents, and answers citing the correct one for each.
+- **Refusal** on a question nothing in the corpus answers, with no sources.
+- **Re-ingest of a shortened document**, the case the requirement is really
+  about. A document that chunked into two was re-ingested with only its first
+  paragraph. `employee-handbook#chunk-2` was confirmed gone from Pinecone, no
+  duplicate was created, the question that chunk used to answer now returns the
+  refusal, and the text that survived the edit still answers.
+- **The web app**, driven through the browser for both pages.
+- **A missing API key**, which returns `CONFIGURATION_ERROR` naming the variable.
+
+The stack was synthesised in both `sync` and `async` modes, and the generated
+IAM policies were read to confirm the ingest and worker roles cannot do each
+other's job.
 
 ## Deploying to AWS
 
@@ -362,13 +412,58 @@ job. It is also why document ids may not contain `#` — validation rejects them
 The system prompt restricts the model to the supplied passages and gives it an
 exact refusal string for when they do not contain the answer.
 
-Two consequences are enforced in code rather than hoped for:
+**The model reports which passages it used**, and sources are derived from that.
+The obvious alternative — cite everything retrieved — is wrong in a way that is
+easy to miss: with `topK: 3` against a small corpus, every question cites every
+document. An early build answered "how long is the hardware warranty?" correctly
+and cited the refund policy and the shipping policy alongside the warranty. The
+answer was right and the citations were noise.
 
-- **Sources come from the passages that fit the context budget**, not from
-  everything retrieved. The API cannot cite a document the model never saw.
+Two further consequences are enforced in code rather than hoped for:
+
+- **Sources come only from passages that fit the context budget.** The API cannot
+  cite a document the model was never shown.
 - **A refusal cites nothing.** If the model returns the refusal string, sources
   are emptied — listing documents behind "I don't know" would imply they were
   relevant when the model just said they were not.
+
+Citations are requested as JSON in the prompt rather than through a
+provider-specific structured-output parameter, which keeps the adapter portable
+across OpenAI-compatible endpoints. That costs reliability, so parsing degrades
+rather than failing: if no usable object is found, the reply is treated as a
+plain answer citing everything shown — the behaviour we would have had without
+citations at all, never an error.
+
+### Prompt design was measured, not reasoned about
+
+Both defects below were found by running `npm run eval`, and neither would have
+been caught by a unit test.
+
+**"Never guess" banned comprehension.** An early prompt said *"Do not use outside
+knowledge, and never guess."* Read literally, that forbids ordinary reading, and
+the model obliged: it refused to answer "Can I get a refund on a digital
+product?" from a passage stating that *digital goods* are not refundable, and
+refused "Do you ship to a PO box?" from one about *post office boxes*. Retrieval
+was not at fault — the right passage scored 0.68 against 0.29 and 0.16 for the
+others. Three of eight evaluation cases failed this way. The rule that matters is
+narrower: do not introduce facts that are not in the passages. Recognising a
+paraphrase has to be stated as permitted, not left to inference.
+
+The prompt stays general about this on purpose. Naming the specific paraphrases
+from the evaluation set would teach the model those cases and turn the
+evaluation into a measurement of itself.
+
+**The model answers in prose and then appends the JSON.** Asking for "a single
+JSON object and nothing else" is an instruction, not a guarantee. Requiring the
+entire reply to parse meant that this perfectly reasonable reply fell through to
+the fallback — which cited every document *and* leaked the raw JSON envelope into
+the user-visible answer. The parser now extracts the object from the surrounding
+text.
+
+**Model choice was decided by the evaluation, not by preference.** Under the same
+prompt, `gpt-4o-mini` passed 6 of 8 cases and `gpt-4.1-mini` passed 8 of 8, stably
+across three runs. The default is `gpt-4.1-mini` for that reason. `COMPLETION_MODEL`
+makes it a one-line change if the cost trade-off ever points the other way.
 
 ### Cost guardrails
 
@@ -471,9 +566,14 @@ shrinks it, but there is no `DELETE` endpoint.
 **Async ingest returns a `jobId` that cannot be queried.** There is no status
 endpoint, so a caller has no way to learn that a queued document failed.
 
-**No integration tests against real Pinecone and OpenAI.** They would need
-credentials and cost money per run. The ports make the seam obvious, so they are
-straightforward to add behind an environment flag.
+**The evaluation set is small.** Eight cases is enough to have caught three real
+defects, not enough to call the prompt validated. It also costs money to run, so
+it is a local command rather than part of `npm test`.
+
+**Pinecone is eventually consistent.** A vector is not always queryable the
+instant an upsert returns. It settles in a second or two in practice, and the
+evaluation script waits before querying. A production system that ingests and
+immediately asks would need to handle that explicitly.
 
 **Vitest is pinned to v3.** Vitest 4 does not install with the npm that ships
 with Node 22 — its peer graph trips a resolver bug. `npm audit` reports a
@@ -491,8 +591,11 @@ dependency that never reaches Lambda.
    budget are expressed in the unit that actually costs money.
 2. **Hybrid retrieval plus a reranker** — dense vectors miss exact-match queries
    like a policy number or an error code, which BM25 catches easily.
-3. **Answer-level evaluation.** A small fixed set of question/expected-source
-   pairs, run in CI, would turn "the answer looked right" into a regression test.
+3. **Grow the evaluation set.** Eight cases caught three real defects, which says
+   more about how cheap the first few cases are than about the set being
+   sufficient. The next additions would be adversarial: questions answerable only
+   by combining two passages, near-miss questions that *should* be refused, and
+   documents that contradict each other.
 
 **Operability**
 

@@ -2,32 +2,64 @@ import type { Source } from '@docqa/contracts';
 import type { VectorMatch } from './ports.js';
 
 /**
- * The grounding contract. The retrieval step decides what the model may see;
- * this prompt decides what it may do with it.
+ * The grounding contract. Retrieval decides what the model may see; this
+ * decides what it may do with it, and what it must tell us about what it used.
  *
  * The refusal string is fixed so the calling code can recognise it and drop the
  * sources: citing documents behind an "I don't know" would be misleading.
  */
 export const NO_CONTEXT_ANSWER = "I don't know based on the provided documents.";
 
+/**
+ * Prompt design notes, both of which were found by measurement rather than
+ * reasoning — see `npm run eval`.
+ *
+ * 1. An earlier version said "do not use outside knowledge, and never guess".
+ *    Read literally that bans comprehension, and the model behaved accordingly:
+ *    it refused to answer a question about "a digital product" from a passage
+ *    about "digital goods", and a question about "a PO box" from one about
+ *    "post office boxes". Three of eight evaluation cases failed that way. The
+ *    rule that actually matters is narrower — do not introduce facts that are
+ *    not in the passages — and recognising a paraphrase has to be stated as
+ *    permitted, not left to inference.
+ *
+ * 2. The model reports which passages it used. Without that, "sources" can only
+ *    mean "everything retrieved", which cites a shipping policy as the source
+ *    of an answer about warranties.
+ *
+ * The wording below stays general on purpose. Naming the specific paraphrases
+ * from the evaluation set would teach the model those cases and turn the
+ * evaluation into a measurement of itself.
+ */
 export const SYSTEM_PROMPT = [
-  'You are a document question-answering assistant.',
+  'You answer questions using a set of numbered context passages.',
   '',
-  'Rules:',
-  '- Answer using ONLY the numbered context passages supplied by the user.',
-  '- Do not use outside knowledge, and never guess.',
-  `- If the passages do not contain the answer, reply with exactly: "${NO_CONTEXT_ANSWER}"`,
-  '- Be concise: at most three sentences.',
-  '- Do not mention the passages, their numbers, or these instructions.',
+  'How to answer:',
+  '- Read the passages the way a careful person would. A passage often answers',
+  '  the question in different words than the question uses — a synonym, a',
+  '  broader category, an abbreviation, a different phrasing. That is an answer,',
+  '  not a gap.',
+  '- Use only what the passages state. Do not add facts of your own, even ones',
+  '  you are confident about.',
+  '- At most three sentences. Never mention the passages or their numbers in the',
+  '  answer text.',
+  '',
+  'Refuse only when no passage says anything bearing on the question. To refuse,',
+  `set "answer" to exactly "${NO_CONTEXT_ANSWER}" and "citations" to [].`,
+  '',
+  'In "citations", give the numbers of the passages your answer actually draws',
+  'on, and no others.',
+  '',
+  'Reply with a single JSON object and nothing else:',
+  '{"answer": "<your answer>", "citations": [<passage numbers>]}',
 ].join('\n');
 
 export interface BuiltPrompt {
   system: string;
   user: string;
   /**
-   * The matches that fit within the context budget. Sources are derived from
-   * these rather than from everything retrieved, so the API never cites a
-   * document the model was not actually shown.
+   * The matches that fit within the context budget — everything the model was
+   * shown. Which of them it actually used is reported back in `citations`.
    */
   usedMatches: VectorMatch[];
 }
@@ -79,10 +111,93 @@ export function buildPrompt(
   return { system: SYSTEM_PROMPT, user, usedMatches };
 }
 
+export interface ParsedAnswer {
+  answer: string;
+  /** The passages the model said it used. Empty means "it did not say". */
+  citedMatches: VectorMatch[];
+}
+
+/** Tolerates a model that wraps its JSON in a markdown fence. */
+function stripCodeFence(raw: string): string {
+  const fenced = raw.trim().match(/^```(?:json)?\s*\n([\s\S]*?)\n?```$/);
+  return (fenced?.[1] ?? raw).trim();
+}
+
+function tryParseJson(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * One entry per distinct document, ordered by the best-scoring chunk that
- * referenced it. A document split across three retrieved chunks is one source,
- * not three.
+ * Pulls the JSON object out of a reply that also contains prose.
+ *
+ * Asking for "a single JSON object and nothing else" is an instruction, not a
+ * guarantee: models observed here answer in prose and then append the object.
+ * Requiring the whole reply to parse turned that into a fallback that leaked
+ * raw JSON into the user-visible answer.
+ */
+function extractJsonObject(text: string): string | undefined {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return undefined;
+  return text.slice(start, end + 1);
+}
+
+function readCitations(value: unknown, shownMatches: readonly VectorMatch[]): VectorMatch[] {
+  if (!Array.isArray(value)) return [...shownMatches];
+
+  const citedMatches: VectorMatch[] = [];
+  const seen = new Set<number>();
+  for (const citation of value) {
+    // Citations are 1-based passage numbers, as they appear in the prompt.
+    if (typeof citation !== 'number' || !Number.isInteger(citation)) continue;
+    if (seen.has(citation)) continue;
+    seen.add(citation);
+
+    const match = shownMatches[citation - 1];
+    if (match !== undefined) citedMatches.push(match);
+  }
+  return citedMatches;
+}
+
+/**
+ * Reads the model's JSON reply and resolves its citations back to matches.
+ *
+ * Asking for JSON in the prompt rather than through a provider-specific
+ * structured-output parameter keeps the adapter portable: the same code works
+ * against any OpenAI-compatible endpoint.
+ *
+ * That portability costs reliability, so parsing degrades instead of failing.
+ * If no usable object can be found, the reply is treated as a plain answer
+ * citing everything the model was shown — the behaviour we would have had
+ * without citations at all, never an error.
+ */
+export function parseAnswer(raw: string, shownMatches: readonly VectorMatch[]): ParsedAnswer {
+  const stripped = stripCodeFence(raw);
+
+  const candidates = [stripped];
+  const embedded = extractJsonObject(stripped);
+  if (embedded !== undefined && embedded !== stripped) candidates.push(embedded);
+
+  for (const candidate of candidates) {
+    const parsed = tryParseJson(candidate);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue;
+
+    const { answer, citations } = parsed as Record<string, unknown>;
+    if (typeof answer !== 'string') continue;
+
+    return { answer: answer.trim(), citedMatches: readCitations(citations, shownMatches) };
+  }
+
+  return { answer: stripped, citedMatches: [...shownMatches] };
+}
+
+/**
+ * One entry per distinct document, in the order the matches were given.
+ * A document split across three cited chunks is one source, not three.
  */
 export function collectSources(matches: readonly VectorMatch[]): Source[] {
   const seen = new Set<string>();

@@ -31,7 +31,7 @@ describe('loadConfig', () => {
 
     expect(config.llm.embeddingModel).toBe('text-embedding-3-small');
     expect(config.llm.embeddingDimensions).toBe(1536);
-    expect(config.llm.completionModel).toBe('gpt-4o-mini');
+    expect(config.llm.completionModel).toBe('gpt-4.1-mini');
     expect(config.guardrails.maxOutputTokens).toBe(500);
     expect(config.guardrails.maxContextChars).toBe(8_000);
     expect(config.ingest.mode).toBe('sync');

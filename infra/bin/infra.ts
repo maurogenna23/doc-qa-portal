@@ -62,7 +62,7 @@ new DocQaStack(app, 'DocQaStack', {
   ...(setting('LLM_BASE_URL') === undefined ? {} : { llmBaseUrl: requiredSetting('LLM_BASE_URL') }),
   embeddingModel: setting('EMBEDDING_MODEL') ?? 'text-embedding-3-small',
   embeddingDimensions: setting('EMBEDDING_DIMENSIONS') ?? '1536',
-  completionModel: setting('COMPLETION_MODEL') ?? 'gpt-4o-mini',
+  completionModel: setting('COMPLETION_MODEL') ?? 'gpt-4.1-mini',
   maxOutputTokens: setting('MAX_OUTPUT_TOKENS') ?? '500',
   maxContextChars: setting('MAX_CONTEXT_CHARS') ?? '8000',
   minScore: setting('MIN_SCORE') ?? '0',
