@@ -65,8 +65,20 @@ export class UpstreamError extends AppError {
     >,
     message: string,
     cause?: unknown,
+    /**
+     * Caller-actionable detail written by us — document ids, counts. Never
+     * third-party text: that is what `cause` is for, and it is logged, not
+     * returned.
+     */
+    details?: readonly string[],
   ) {
-    super({ code, message, statusCode: 502, cause });
+    super({
+      code,
+      message,
+      statusCode: 502,
+      cause,
+      ...(details === undefined ? {} : { details }),
+    });
   }
 }
 

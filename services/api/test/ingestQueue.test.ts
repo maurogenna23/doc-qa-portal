@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  deduplicationId,
   objectKey,
   parseIngestJobMessage,
   parseStagedDocument,
@@ -63,5 +64,38 @@ describe('parseStagedDocument', () => {
     expect(() => parseStagedDocument('{', 'ingest/job-1/doc.json')).toThrow(
       /ingest\/job-1\/doc\.json/,
     );
+  });
+});
+
+describe('deduplicationId', () => {
+  const DOCUMENT = { id: 'refund-policy', title: 'Refund Policy', content: 'No refunds.' };
+
+  it('is the same for the same document, so a client retry deduplicates', () => {
+    // It used to be `${jobId}:${docId}` with a fresh jobId per request, so the
+    // retry it claimed to make idempotent produced a new id every time and
+    // deduplicated nothing.
+    expect(deduplicationId(DOCUMENT)).toBe(deduplicationId({ ...DOCUMENT }));
+  });
+
+  it('changes when the content changes, so an edit is a second ingest', () => {
+    expect(deduplicationId(DOCUMENT)).not.toBe(
+      deduplicationId({ ...DOCUMENT, content: 'Full refund within 30 days.' }),
+    );
+  });
+
+  it('changes when the title changes, because the title is indexed too', () => {
+    expect(deduplicationId(DOCUMENT)).not.toBe(
+      deduplicationId({ ...DOCUMENT, title: 'Refunds' }),
+    );
+  });
+
+  it('distinguishes documents whose fields concatenate to the same string', () => {
+    expect(deduplicationId({ id: 'a', title: 'b', content: 'c' })).not.toBe(
+      deduplicationId({ id: 'a\nb', title: '', content: 'c' }),
+    );
+  });
+
+  it('fits inside the SQS deduplication id limit', () => {
+    expect(deduplicationId(DOCUMENT).length).toBeLessThanOrEqual(128);
   });
 });

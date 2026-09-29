@@ -147,6 +147,37 @@ describe('chunkText', () => {
     }
   });
 
+  it('reaches zero overlap only when one sentence nearly fills a whole chunk', () => {
+    const options: ChunkingOptions = {
+      maxChunkChars: 800,
+      overlapChars: 150,
+      maxChunksPerDocument: 100,
+    };
+
+    let counter = 0;
+    const sentence = (length: number): string => {
+      const words: string[] = [];
+      while (words.join(' ').length < length - 1) words.push(`w${counter++}`);
+      return `${words.join(' ').slice(0, length - 1)}.`;
+    };
+
+    const overlapAt = (length: number): number => {
+      counter = 0;
+      const chunks = chunkText([sentence(length), sentence(length), sentence(length)].join(' '), options);
+      const first = chunks[0];
+      const second = chunks[1];
+      if (first === undefined || second === undefined) return -1;
+      return sharedBoundary(first.text, second.text).length;
+    };
+
+    // The ramp degrades rather than cliff-edging, and only bottoms out when a
+    // single sentence leaves no room beside itself.
+    expect(overlapAt(650)).toBeGreaterThan(100);
+    expect(overlapAt(750)).toBeGreaterThan(0);
+    expect(overlapAt(790)).toBeGreaterThan(0);
+    expect(overlapAt(799)).toBe(0);
+  });
+
   it('never exceeds the chunk size while carrying a partial overlap', () => {
     const options: ChunkingOptions = {
       maxChunkChars: 800,

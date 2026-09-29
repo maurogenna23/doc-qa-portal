@@ -33,6 +33,12 @@ export const NO_CONTEXT_ANSWER = "I don't know based on the provided documents."
  *    close it, and the limitation is stated in the README rather than implied
  *    to be solved.
  *
+ * 4. Every user-controlled value is sanitised, not just the body. An earlier
+ *    version neutralised chunk text and left the title to a regex that removed
+ *    quotes and angle brackets but not newlines, so the title escaped its own
+ *    attribute and injected structure into the header line. Anything a caller
+ *    supplies is hostile, wherever it is rendered.
+ *
  * The wording below stays general on purpose. Naming the specific paraphrases
  * from the evaluation set would teach the model those cases and turn the
  * evaluation into a measurement of itself.
@@ -101,8 +107,22 @@ function neutraliseDelimiters(text: string): string {
   return text.replace(/<(\/?)(passage|documents|question)\b/gi, '&lt;$1$2');
 }
 
+/**
+ * Renders a value safe to place inside a delimiter's attribute.
+ *
+ * Stripping quotes and angle brackets is not enough: an attribute lives on one
+ * line, so a newline ends the header and everything after it reads as prompt
+ * structure rather than as quoted data. A 144-character title carrying two
+ * newlines hijacked two of three answers, including a question about an
+ * entirely different document. Length is capped too — a header is a header.
+ */
 function attribute(value: string): string {
-  return value.replace(/[<>"]/g, '');
+  return neutraliseDelimiters(value)
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/[<>"]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
 }
 
 function formatPassage(ordinal: number, match: VectorMatch): string {

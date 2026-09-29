@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { SendMessageBatchCommand, SQSClient } from '@aws-sdk/client-sqs';
 import type { IngestDocumentInput } from '@docqa/contracts';
@@ -44,6 +45,28 @@ export function objectKey(jobId: string, docId: string): string {
   return `ingest/${jobId}/${encodeURIComponent(docId)}.json`;
 }
 
+/**
+ * Deduplication id for a document, derived from what is being written.
+ *
+ * It used to be `${jobId}:${docId}` with a fresh jobId per request, so a client
+ * retrying the same call produced a new id and deduplicated nothing — while the
+ * comment beside it claimed retries were idempotent. Hashing the content makes
+ * the claim true: the same document sent twice inside the dedup window is one
+ * ingest, and a genuinely edited document is a different id and a second one.
+ */
+export function deduplicationId(document: IngestDocumentInput): string {
+  return createHash('sha256')
+    .update(`${document.id}\n${document.title}\n${document.content}`)
+    .digest('hex');
+}
+
+/** Extracts a rejection's message without letting it reach a response body. */
+function rejectionReason(outcome: PromiseSettledResult<unknown> | undefined): string {
+  if (outcome === undefined || outcome.status !== 'rejected') return 'unknown error';
+  const { reason } = outcome;
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
 function batch<T>(items: readonly T[], size: number): T[][] {
   const batches: T[][] = [];
   for (let index = 0; index < items.length; index += size) {
@@ -60,9 +83,10 @@ function batch<T>(items: readonly T[], size: number): T[][] {
  * Gateway timeout that async ingest exists to stay under.
  *
  * Staging is at-least-once. A failure after some documents are already queued
- * leaves those queued, and the error names the ones that did not make it, so a
- * caller retrying the whole request re-queues only what it must — the
- * deduplication id makes a repeated document within the dedup window a no-op.
+ * leaves those queued, and the error names the ones that did not make it in its
+ * `details`, which do reach the caller. Retrying the whole request is safe: the
+ * deduplication id is derived from each document's content, so the ones that
+ * already made it are a no-op within the dedup window.
  */
 export async function enqueueDocuments(
   documents: readonly IngestDocumentInput[],
@@ -85,21 +109,33 @@ export async function enqueueDocuments(
 
   const failedToStage = documents
     .map((document, index) => ({ document, outcome: staged[index] }))
-    .filter((entry) => entry.outcome?.status !== 'fulfilled')
-    .map((entry) => entry.document.id);
+    .filter((entry) => entry.outcome?.status !== 'fulfilled');
 
   if (failedToStage.length > 0) {
     throw new UpstreamError(
       'INGEST_TRANSPORT_ERROR',
       `Failed to stage ${failedToStage.length} of ${documents.length} documents for ingest.`,
-      new Error(`Documents not staged: ${failedToStage.join(', ')}.`),
+      // The real cause — AccessDenied, NoSuchBucket, throttling — was being
+      // discarded in favour of a synthetic error listing ids, so CloudWatch
+      // showed what failed and never why.
+      new Error(
+        failedToStage
+          .map((entry) => `${entry.document.id}: ${rejectionReason(entry.outcome)}`)
+          .join('; '),
+      ),
+      // Document ids are the caller's own data, so they belong in the response.
+      failedToStage.map((entry) => entry.document.id),
     );
   }
 
-  const messages: IngestJobMessage[] = staged.flatMap((outcome) =>
-    outcome.status === 'fulfilled'
-      ? [{ jobId: options.jobId, docId: outcome.value.docId, bucket: options.bucket, key: outcome.value.key }]
-      : [],
+  const messages: (IngestJobMessage & { deduplicationId: string })[] = documents.map(
+    (document) => ({
+      jobId: options.jobId,
+      docId: document.id,
+      bucket: options.bucket,
+      key: objectKey(options.jobId, document.id),
+      deduplicationId: deduplicationId(document),
+    }),
   );
 
   const failedToQueue: string[] = [];
@@ -112,11 +148,17 @@ export async function enqueueDocuments(
           QueueUrl: options.queueUrl,
           Entries: group.map((message, index) => ({
             Id: String(index),
-            MessageBody: JSON.stringify(message),
+            MessageBody: JSON.stringify({
+              jobId: message.jobId,
+              docId: message.docId,
+              bucket: message.bucket,
+              key: message.key,
+            } satisfies IngestJobMessage),
             // Serialises writes to one document without serialising the rest.
             MessageGroupId: message.docId,
-            // Makes a retry of the same job idempotent within the dedup window.
-            MessageDeduplicationId: `${message.jobId}:${message.docId}`,
+            // Derived from the document's content, so a client retry of the
+            // same request is deduplicated rather than ingested twice.
+            MessageDeduplicationId: message.deduplicationId,
           })),
         }),
       );
@@ -140,7 +182,8 @@ export async function enqueueDocuments(
     throw new UpstreamError(
       'INGEST_TRANSPORT_ERROR',
       `Failed to enqueue ${failedToQueue.length} of ${documents.length} documents.`,
-      new Error(`Documents not queued: ${failedToQueue.join(', ')}.`),
+      undefined,
+      failedToQueue,
     );
   }
 }

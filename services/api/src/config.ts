@@ -93,14 +93,16 @@ export function loadConfig(env: Env = process.env): AppConfig {
   // An earlier version computed these inside the returned object, after the
   // check, so `numeric` pushed onto a `problems` array nobody read again and
   // MAX_OUTPUT_TOKENS=-5 was accepted silently.
+  // Upper bounds as well as lower ones: these exist to cap spend, and a
+  // guardrail that accepts 1e9 is not a guardrail.
   const maxOutputTokens = numeric(env, 'MAX_OUTPUT_TOKENS', 500, problems);
-  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0) {
-    problems.push('MAX_OUTPUT_TOKENS must be a positive integer.');
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0 || maxOutputTokens > 8_000) {
+    problems.push('MAX_OUTPUT_TOKENS must be an integer between 1 and 8000.');
   }
 
   const maxContextChars = numeric(env, 'MAX_CONTEXT_CHARS', 8_000, problems);
-  if (!Number.isInteger(maxContextChars) || maxContextChars <= 0) {
-    problems.push('MAX_CONTEXT_CHARS must be a positive integer.');
+  if (!Number.isInteger(maxContextChars) || maxContextChars <= 0 || maxContextChars > 200_000) {
+    problems.push('MAX_CONTEXT_CHARS must be an integer between 1 and 200000.');
   }
 
   const minScore = numeric(env, 'MIN_SCORE', 0, problems);

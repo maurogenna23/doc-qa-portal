@@ -25,6 +25,17 @@ export const LIMITS = {
  */
 export const DOC_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 
+/**
+ * Control characters, including newlines, in a single-line field.
+ *
+ * A title is rendered into a delimiter's attribute when the prompt is built,
+ * and an attribute occupies one line. A title carrying newlines therefore
+ * escapes it and injects structure into the prompt. The prompt sanitises this
+ * too; rejecting it here means a caller learns their input was wrong instead of
+ * having it silently rewritten.
+ */
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -117,6 +128,12 @@ export function parseIngestRequest(body: unknown): IngestDocumentInput[] {
       problems,
     );
 
+    if (title !== null && CONTROL_CHARACTERS.test(title)) {
+      problems.push(
+        `documents[${index}].title must be a single line without control characters.`,
+      );
+      return;
+    }
     if (id !== null && !DOC_ID_PATTERN.test(id)) {
       problems.push(
         `documents[${index}].id may only contain letters, digits, and the characters . _ : -`,

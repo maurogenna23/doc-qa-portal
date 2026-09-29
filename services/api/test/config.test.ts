@@ -104,3 +104,30 @@ describe('loadConfig', () => {
     expect(config.llm.baseUrl).toBe('https://api.groq.com/openai/v1');
   });
 });
+
+describe('loadConfig upper bounds', () => {
+  const MINIMAL_CONFIG = {
+    PINECONE_API_KEY: 'pcsk_test',
+    PINECONE_INDEX: 'doc-qa',
+    LLM_API_KEY: 'sk-test',
+  };
+
+  it.each([
+    ['MAX_OUTPUT_TOKENS', '1e9'],
+    ['MAX_OUTPUT_TOKENS', '100000'],
+    ['MAX_CONTEXT_CHARS', '1e9'],
+  ])('rejects %s=%s, because a guardrail without a ceiling is not one', (key, value) => {
+    expect(() => loadConfig({ ...MINIMAL_CONFIG, [key]: value })).toThrow(ConfigurationError);
+  });
+
+  it('still accepts a generous but sane value', () => {
+    const config = loadConfig({
+      ...MINIMAL_CONFIG,
+      MAX_OUTPUT_TOKENS: '4000',
+      MAX_CONTEXT_CHARS: '100000',
+    });
+
+    expect(config.guardrails.maxOutputTokens).toBe(4_000);
+    expect(config.guardrails.maxContextChars).toBe(100_000);
+  });
+});

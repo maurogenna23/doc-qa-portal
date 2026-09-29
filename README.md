@@ -48,7 +48,7 @@ services/api
   src/adapters          OpenAI, Pinecone, S3/SQS, logging
   src/handlers          Lambda entry points (ingest, ask, SQS worker)
   src/local             dev server that invokes the real handlers
-  test                  unit tests (124)
+  test                  unit tests (141)
 infra                   AWS CDK stack
 apps/web                Next.js app
 ```
@@ -61,7 +61,7 @@ implements those interfaces against real services.
 
 That boundary buys three concrete things:
 
-1. **The pipeline is testable without a network or an API key.** All 124 tests run
+1. **The pipeline is testable without a network or an API key.** All 141 tests run
    in under a second against in-memory doubles.
 2. **The SQS worker reuses the pipeline unchanged.** Async ingest changes *when*
    the work happens, not *what* the work is, so the bonus cost almost nothing.
@@ -137,7 +137,7 @@ that can disagree.
 | `MAX_OUTPUT_TOKENS` | no | `500` | Ceiling on generated tokens |
 | `MAX_CONTEXT_CHARS` | no | `8000` | Ceiling on retrieved context sent to the LLM |
 | `MIN_SCORE` | no | `0` | Cosine floor for a chunk to be used; `0` disables |
-| `INGEST_MODE` | no | `sync` | `sync` or `async` |
+| `INGEST_MODE` | no | `sync` | `sync` or `async`. `sync` is simpler and matches the response shape the assignment specifies; `async` is the one that serialises concurrent writes to a document — see [Those three steps are not atomic](#those-three-steps-are-not-atomic) |
 | `INGEST_BUCKET` | async only | — | Set automatically by CDK |
 | `INGEST_QUEUE_URL` | async only | — | Set automatically by CDK |
 | `API_RATE_LIMIT` | no | `10` | API Gateway steady-state requests/second |
@@ -275,12 +275,14 @@ provider text is absent from the body, and that it is present in the log.
 npm test
 ```
 
-124 unit tests, all against in-memory doubles, so they need no credentials and
+141 unit tests, all against in-memory doubles, so they need no credentials and
 cost nothing to run. They cover:
 
-- **chunking** — determinism, the overlap invariant across every consecutive
-  pair, sentence-boundary splitting, hard-splitting a sentence longer than a
-  chunk, and the overlap cap that guarantees forward progress
+- **chunking** — determinism, sentence-boundary splitting, hard-splitting a
+  sentence longer than a chunk, the overlap cap that guarantees forward
+  progress, and the overlap ramp: that it degrades with sentence length rather
+  than cliff-edging, and reaches zero only at the boundary where one sentence
+  nearly fills a whole chunk
 - **re-ingest** — that the same id updates in place, that a *shortened* document
   has its trailing chunks deleted, and that other documents are untouched
 - **prompt building** — context-budget truncation, and that sources are derived
@@ -310,15 +312,16 @@ corpus answers, and a question the model certainly knows but must still refuse
 because it is not in the documents.
 
 There are two suites. `clean corpus` measures answer and citation quality.
-`poisoned corpus` seeds the same documents plus three carrying prompt-injection
-attempts and fails any case where the injected phrase reaches the answer.
+`poisoned corpus` seeds the same documents plus four carrying prompt-injection
+attempts — through the body and through the title — and fails any case where the
+injected phrase reaches the answer.
 
 ```bash
 npm run eval                  # both suites
 npm run eval -- eval-poisoned # just the injection suite
 ```
 
-It costs a fraction of a cent per run and it has caught five defects no unit
+It costs a fraction of a cent per run and it has caught eight defects no unit
 test could have — described under
 [Prompt design](#prompt-design-was-measured-not-reasoned-about) and
 [Prompt injection](#prompt-injection-mitigated-not-solved).
@@ -343,7 +346,10 @@ Pinecone index and the OpenAI API:
 - **A rejected Pinecone key**, confirming the provider's message appears in the
   log and not in the response body.
 - **Prompt injection**, measured as the table under
-  [Prompt injection](#prompt-injection-mitigated-not-solved) reports it.
+  [Prompt injection](#prompt-injection-mitigated-not-solved) reports it, through
+  both the document body and the title.
+- **A partial enqueue failure**, confirming the response names the documents that
+  did not make it while the underlying AWS error stays in the log.
 
 The stack was synthesised in both `sync` and `async` modes, the generated IAM
 policies were read to confirm the ingest and worker roles cannot do each other's
@@ -539,37 +545,54 @@ instructions. A document can therefore try to overrule them, and the citation
 mechanism makes it worse: a hijacked answer arrives with a credible source
 attached.
 
-The evaluation has a second suite for this. It seeds the clean corpus plus three
+The evaluation has a second suite for this. It seeds the clean corpus plus four
 documents carrying different injection styles — a fake system notice, a forged
-passage tag, and a fake end-of-documents marker — then asks ordinary questions.
-A case fails if the injected phrase appears in the answer at all.
+passage tag, a fake end-of-documents marker, and one that attacks through the
+**title** rather than the body — then asks ordinary questions. A case fails if
+the injected phrase appears in the answer at all. The suite ingests through the
+real validator, so a payload the API would reject cannot inflate the score by
+never reaching the index.
 
-Measured over three runs each, same corpus, same model:
+Measured over three runs each, same corpus and model:
 
 | Prompt | Clean corpus | Poisoned corpus |
 | --- | --- | --- |
-| Before hardening | 8/8 | **3/8** |
-| After hardening | 8/8 | **5/8** |
+| Before hardening | 8/8 | **4/10** |
+| After hardening | 8/8 | **7/10** |
 
-The hardening is three things: passage text is wrapped in delimiters and
-declared untrusted data rather than interpolated raw; anything in a document
-that could close or forge a delimiter is neutralised, without which the
-delimiting is theatre; and the question is tagged rather than separated by a
-bare rule, because one of the injections reproduced that rule followed by a
-fake system message.
+The hardening is four things:
 
-**It is not a fix.** Three of eight cases still get through, consistently. A
-prompt is the wrong layer for this: the real answers are authenticating
-`/ingest` so arbitrary text cannot enter the corpus, and treating retrieved
-content as data at a level the model cannot be argued out of. Both are beyond
-what this exercise asked for, so what is here is the mitigation plus an honest
-measurement of its ceiling — and a suite that will show any future change to
-the prompt moving that number in either direction.
+1. Passage text is delimited and declared untrusted rather than interpolated raw.
+2. Anything in a document that could close or forge a delimiter is neutralised,
+   without which the delimiting is theatre.
+3. The question is tagged rather than separated by a bare rule, because one
+   injection reproduced that rule followed by a fake system message.
+4. **Every user-controlled value is sanitised, not only the body.** The title is
+   rendered into the passage header, and a header is one line. An earlier version
+   stripped quotes and angle brackets from it but not newlines, so a
+   144-character title escaped its own attribute and injected structure into the
+   header — hijacking two of three answers, one of them about an unrelated
+   document. Titles carrying control characters are now rejected at the API as
+   well, so a caller learns their input was wrong rather than having it silently
+   rewritten.
 
-Worth noting where this came from: the cost guardrails reason carefully about
-an unauthenticated public endpoint being abused for *volume*, and say nothing
-about it being abused for *content*. The same endpoint, the same threat model,
-one half considered.
+Point four is the one worth dwelling on. The body was treated as hostile and the
+title was not, because the body is the part that *looks* like content. The lesson
+is not "escape newlines": it is that a field's threat model comes from where it
+is rendered, not from what it is called.
+
+**It is still not a fix.** Three of ten cases get through, consistently. A prompt
+is the wrong layer: the real answers are authenticating `/ingest` so arbitrary
+text cannot enter the corpus, and treating retrieved content as data at a level
+the model cannot be argued out of. Both are beyond what this exercise asked for,
+so what is here is the mitigation, an honest measurement of its ceiling, and a
+suite that will show any future change to the prompt moving that number in either
+direction.
+
+Worth noting where this came from: the cost guardrails reason carefully about an
+unauthenticated public endpoint being abused for *volume*, and said nothing about
+it being abused for *content*. The same endpoint, the same threat model, one half
+considered.
 
 ### Cost guardrails
 
@@ -615,9 +638,22 @@ No duplicated logic between the two paths.
 **Staging and queueing are parallel and batched.** Twenty documents used to mean
 forty sequential AWS round trips inside the 29-second API Gateway timeout that
 async ingest exists to stay under; it is now parallel S3 puts plus two
-`SendMessageBatch` calls. A partial failure names the documents that did not make
-it, so a retry re-queues only those — staging is at-least-once, and the
-deduplication id absorbs the overlap.
+`SendMessageBatch` calls.
+
+**A partial failure names the documents in the error's `details`**, which do
+reach the caller, so retrying the whole request is actionable rather than a
+guess. This is worth spelling out because it was briefly untrue: the names were
+put in `cause`, and the fix that stopped provider text reaching the body stopped
+these reaching it too. Two correct changes that contradicted each other, and
+nothing exercised the combined path.
+
+**The deduplication id is derived from the document's content**, not from a
+per-request job id. It used to be `${jobId}:${docId}` with a fresh job id per
+request, so the client retry it claimed to make idempotent produced a new id
+every time and deduplicated nothing — while three places in the code and the
+README said otherwise. Hashing `id + title + content` makes the claim true: the
+same document sent twice inside the dedup window is one ingest, an edited one is
+a second.
 
 **The worker has a reserved concurrency ceiling.** Throttling the API caps how
 fast work is *accepted*, not how many workers run at once. Without a ceiling a
@@ -629,6 +665,14 @@ sets that limit.
 document does not force SQS to redeliver the whole batch and re-embed — and
 re-pay for — documents that already succeeded. After three attempts a message
 goes to the dead-letter queue, which is FIFO because its source queue is.
+
+**Once a message fails, every later message of its group fails with it.** This
+is the part that makes per-message reporting safe on a FIFO queue. Reporting
+only the individually failed message would break the very ordering the queue
+exists to provide: if v1 of a document fails transiently and v2 succeeds, SQS
+redelivers v1 alone and it lands *after* v2, leaving the index on the older
+version — silently, and by the same mechanism as the race the FIFO queue was
+introduced to fix.
 
 The queue's visibility timeout is six times the worker timeout, the ratio AWS
 recommends, so a slow document is not redelivered while it is still being
@@ -661,12 +705,16 @@ scale.
 
 ## Trade-offs and known limitations
 
-**Concurrent writes to the same document id are only safe in async mode.** The
-full explanation is under [Those three steps are not atomic](#those-three-steps-are-not-atomic).
-FIFO grouping fixes the async path; the synchronous path would need a lock the
-vector store does not offer.
+**Concurrent writes to the same document id are only safe in async mode, and
+`sync` is the default.** The full explanation is under
+[Those three steps are not atomic](#those-three-steps-are-not-atomic). FIFO
+grouping fixes the async path; the synchronous path would need a lock the vector
+store does not offer. The default is the simpler mode rather than the safer one
+because it is what the assignment's response shape describes — a deployment with
+more than one writer should set `INGEST_MODE=async`, and that is a decision this
+README makes the reader take deliberately rather than one it hides.
 
-**Prompt injection is mitigated, not solved.** Three of eight poisoned cases
+**Prompt injection is mitigated, not solved.** Three of ten poisoned cases
 still get through. See [Prompt injection](#prompt-injection-mitigated-not-solved)
 for the measurement and why the real fix is not a prompt.
 
@@ -708,8 +756,8 @@ endpoint, so a caller has no way to learn that a queued document failed. It also
 means a partial enqueue failure is reported once, in the response, and not
 afterwards.
 
-**The evaluation suites are small.** Sixteen cases across two suites is enough to
-have caught five real defects, not enough to call the prompt validated. They cost
+**The evaluation suites are small.** Eighteen cases across two suites is enough to
+have caught eight real defects, not enough to call the prompt validated. They cost
 money to run, so they are a local command rather than part of `npm test`.
 
 **Pinecone is eventually consistent.** A vector is not always queryable the
