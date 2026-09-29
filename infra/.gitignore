@@ -1,0 +1,4 @@
+cdk.out/
+*.js
+*.d.ts
+!jest.config.js
