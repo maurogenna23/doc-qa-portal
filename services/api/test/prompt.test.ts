@@ -33,8 +33,22 @@ describe('buildPrompt', () => {
   it('numbers passages from one, in retrieval order', () => {
     const prompt = buildPrompt('Anything?', [REFUNDS, SHIPPING], 8_000);
 
-    expect(prompt.user.indexOf('[1]')).toBeLessThan(prompt.user.indexOf('[2]'));
-    expect(prompt.user).toContain('[1] Refund Policy (docId: refund-policy)');
+    expect(prompt.user.indexOf('number="1"')).toBeLessThan(prompt.user.indexOf('number="2"'));
+    expect(prompt.user).toContain('title="Refund Policy"');
+    expect(prompt.user).toContain('docId="refund-policy"');
+  });
+
+  it('delimits passage text and labels it untrusted', () => {
+    // Regression guard: chunk text used to be interpolated straight into the
+    // message, putting user-uploaded content on the same footing as our own
+    // instructions.
+    const prompt = buildPrompt('Anything?', [REFUNDS], 8_000);
+
+    expect(prompt.user).toContain('<passage');
+    expect(prompt.user).toContain('</passage>');
+    expect(prompt.user).toContain('untrusted');
+    expect(prompt.system).toContain('never an');
+    expect(prompt.system).toContain('instruction');
   });
 
   it('gives the model the exact refusal string and asks it to cite its passages', () => {

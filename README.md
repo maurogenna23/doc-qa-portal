@@ -48,7 +48,7 @@ services/api
   src/adapters          OpenAI, Pinecone, S3/SQS, logging
   src/handlers          Lambda entry points (ingest, ask, SQS worker)
   src/local             dev server that invokes the real handlers
-  test                  unit tests (93)
+  test                  unit tests (124)
 infra                   AWS CDK stack
 apps/web                Next.js app
 ```
@@ -61,7 +61,7 @@ implements those interfaces against real services.
 
 That boundary buys three concrete things:
 
-1. **The pipeline is testable without a network or an API key.** All 72 tests run
+1. **The pipeline is testable without a network or an API key.** All 124 tests run
    in under a second against in-memory doubles.
 2. **The SQS worker reuses the pipeline unchanged.** Async ingest changes *when*
    the work happens, not *what* the work is, so the bonus cost almost nothing.
@@ -142,6 +142,9 @@ that can disagree.
 | `INGEST_QUEUE_URL` | async only | — | Set automatically by CDK |
 | `API_RATE_LIMIT` | no | `10` | API Gateway steady-state requests/second |
 | `API_BURST_LIMIT` | no | `20` | API Gateway burst ceiling |
+| `INGEST_WORKER_CONCURRENCY` | no | `5` | Ceiling on concurrent ingest workers, and so on concurrent provider calls |
+| `PINECONE_CLOUD` | no | `aws` | Only read by `npm run setup:pinecone` |
+| `PINECONE_REGION` | no | `us-east-1` | Only read by `npm run setup:pinecone` |
 | `PORT` | no | `4000` | Local API server port |
 
 The web app reads one variable of its own:
@@ -251,9 +254,18 @@ curl -s http://localhost:4000/ask \
 | `502` | Pinecone or the LLM provider failed |
 | `500` | Missing configuration, or an unexpected error |
 
-An unexpected error always returns a generic message. Provider payloads and
-stack traces go to the log, never to the response body — there is a test
-asserting an API key in an error message cannot leak to the caller.
+`message` is always a string this codebase wrote. A third party's own text —
+the Pinecone SDK's rejection notice, an OpenAI error payload, a stack trace —
+travels in the error's `cause`, which is logged and never serialised into the
+body.
+
+This was not true in an earlier version. The Pinecone adapter interpolated the
+SDK's message into the error, so a rejected API key returned the index name and
+the internal endpoint to an unauthenticated caller, while the README claimed
+otherwise. The test that was supposed to cover it only exercised the
+non-`AppError` branch, so it passed against a false property, which is worse
+than having no test. `test/http.test.ts` now asserts both halves: that the
+provider text is absent from the body, and that it is present in the log.
 
 ---
 
@@ -263,7 +275,7 @@ asserting an API key in an error message cannot leak to the caller.
 npm test
 ```
 
-93 unit tests, all against in-memory doubles, so they need no credentials and
+124 unit tests, all against in-memory doubles, so they need no credentials and
 cost nothing to run. They cover:
 
 - **chunking** — determinism, the overlap invariant across every consecutive
@@ -297,8 +309,19 @@ passage), a compound question spanning two documents, a question nothing in the
 corpus answers, and a question the model certainly knows but must still refuse
 because it is not in the documents.
 
-It costs a fraction of a cent per run and it caught two real defects that no unit
-test could have — both described under [Prompt design](#prompt-design-was-measured-not-reasoned-about).
+There are two suites. `clean corpus` measures answer and citation quality.
+`poisoned corpus` seeds the same documents plus three carrying prompt-injection
+attempts and fails any case where the injected phrase reaches the answer.
+
+```bash
+npm run eval                  # both suites
+npm run eval -- eval-poisoned # just the injection suite
+```
+
+It costs a fraction of a cent per run and it has caught five defects no unit
+test could have — described under
+[Prompt design](#prompt-design-was-measured-not-reasoned-about) and
+[Prompt injection](#prompt-injection-mitigated-not-solved).
 
 ---
 
@@ -317,10 +340,15 @@ Pinecone index and the OpenAI API:
 - **The web app**, driven through the browser: a document added on `/docs` was
   then answerable on `/` with that document as its only source.
 - **A missing API key**, which returns `CONFIGURATION_ERROR` naming the variable.
+- **A rejected Pinecone key**, confirming the provider's message appears in the
+  log and not in the response body.
+- **Prompt injection**, measured as the table under
+  [Prompt injection](#prompt-injection-mitigated-not-solved) reports it.
 
-The stack was synthesised in both `sync` and `async` modes, and the generated
-IAM policies were read to confirm the ingest and worker roles cannot do each
-other's job.
+The stack was synthesised in both `sync` and `async` modes, the generated IAM
+policies were read to confirm the ingest and worker roles cannot do each other's
+job, and the template was checked for FIFO queues, the worker's reserved
+concurrency and the throttling settings.
 
 ## Deploying to AWS
 
@@ -373,11 +401,19 @@ mostly signal rather than surrounding noise, large enough to keep a paragraph's
 argument intact. The overlap exists so an answer that straddles a boundary stays
 retrievable from either side.
 
-Two details that matter more than they look:
+Three details that matter more than they look:
 
 - **The overlap is capped at half a chunk.** Beyond that, each chunk would be
   mostly repeated text and the splitter would stop making forward progress. The
   cap is enforced in code and covered by a test.
+- **The overlap shrinks to fit rather than disappearing.** An earlier version
+  carried the full overlap when it fit and none at all when it did not, so any
+  sentence longer than roughly `maxChunkChars - overlapChars` produced chunks
+  with no overlap whatsoever — silently, and precisely for the long-sentence
+  prose that contracts and policies are made of. It now carries as much as fits
+  beside the new text: 145 characters becomes 95, then 45, then 5, reaching zero
+  only when a single sentence nearly fills a whole chunk and there is genuinely
+  no room. A test sweeps that range.
 - **The function is pure and deterministic.** Same input, same chunks, always.
   That is what makes stable vector ids possible, which is what makes re-ingest
   work.
@@ -407,6 +443,36 @@ Listing by id prefix, rather than deleting by metadata filter, is deliberate:
 Pinecone serverless indexes do not support delete-by-filter. The
 `${docId}#chunk-N` id convention exists precisely so prefix listing can do this
 job. It is also why document ids may not contain `#` — validation rejects them.
+
+#### Those three steps are not atomic
+
+The reasoning above covers a concurrent **reader**. It does not cover a
+concurrent **writer**, and that is the case that breaks.
+
+Two ingests of the same document id can interleave so that the short version
+lists the index, the long version upserts its five chunks, and the short
+version then deletes "everything that is not mine" — removing chunks the other
+writer just wrote. The result is the long version truncated to two chunks: a
+state that was never submitted, reported to both callers as success.
+
+There is a deterministic reproduction of this in
+`test/ingest.test.ts`. It forces the interleaving rather than racing for it, so
+it fails the same way every run.
+
+**The async path fixes it.** The queue is FIFO and every message carries
+`MessageGroupId = docId`. SQS delivers one message group to one consumer at a
+time, so two writes to the same document are serialised while different
+documents stay fully parallel. Deduplication ids make a retried job idempotent
+within the dedup window.
+
+**The synchronous path does not.** Two concurrent `POST /ingest` calls for the
+same id can still interleave. Fixing it there needs a lock the vector store
+cannot provide — a conditional write in DynamoDB keyed by document id, or
+routing every write through the FIFO queue and giving up the synchronous
+response shape the assignment specifies. For a single-writer deployment, which
+is what a take-home exercises, the synchronous path is correct; for concurrent
+writers, `INGEST_MODE=async` is the supported answer, and this is the first
+thing I would change before anyone relied on it.
 
 ### Grounding and sources
 
@@ -466,6 +532,45 @@ prompt, `gpt-4o-mini` passed 6 of 8 cases and `gpt-4.1-mini` passed 8 of 8, stab
 across three runs. The default is `gpt-4.1-mini` for that reason. `COMPLETION_MODEL`
 makes it a one-line change if the cost trade-off ever points the other way.
 
+### Prompt injection: mitigated, not solved
+
+Documents are user-supplied text that reaches the same message as the
+instructions. A document can therefore try to overrule them, and the citation
+mechanism makes it worse: a hijacked answer arrives with a credible source
+attached.
+
+The evaluation has a second suite for this. It seeds the clean corpus plus three
+documents carrying different injection styles — a fake system notice, a forged
+passage tag, and a fake end-of-documents marker — then asks ordinary questions.
+A case fails if the injected phrase appears in the answer at all.
+
+Measured over three runs each, same corpus, same model:
+
+| Prompt | Clean corpus | Poisoned corpus |
+| --- | --- | --- |
+| Before hardening | 8/8 | **3/8** |
+| After hardening | 8/8 | **5/8** |
+
+The hardening is three things: passage text is wrapped in delimiters and
+declared untrusted data rather than interpolated raw; anything in a document
+that could close or forge a delimiter is neutralised, without which the
+delimiting is theatre; and the question is tagged rather than separated by a
+bare rule, because one of the injections reproduced that rule followed by a
+fake system message.
+
+**It is not a fix.** Three of eight cases still get through, consistently. A
+prompt is the wrong layer for this: the real answers are authenticating
+`/ingest` so arbitrary text cannot enter the corpus, and treating retrieved
+content as data at a level the model cannot be argued out of. Both are beyond
+what this exercise asked for, so what is here is the mitigation plus an honest
+measurement of its ceiling — and a suite that will show any future change to
+the prompt moving that number in either direction.
+
+Worth noting where this came from: the cost guardrails reason carefully about
+an unauthenticated public endpoint being abused for *volume*, and say nothing
+about it being abused for *content*. The same endpoint, the same threat model,
+one half considered.
+
 ### Cost guardrails
 
 The endpoints are unauthenticated, as the assignment specifies. Input limits and
@@ -486,7 +591,7 @@ throttling are therefore what stand between a public URL and a surprise bill.
 `INGEST_MODE=async` moves the expensive part off the request path:
 
 ```
-POST /ingest ──▶ write document to S3 ──▶ publish pointer to SQS ──▶ 202 Accepted
+POST /ingest ──▶ stage documents in S3 ──▶ batch-send pointers to SQS ──▶ 202
                                                   │
                                                   ▼
                                     worker Lambda: read S3 → chunk →
@@ -497,13 +602,33 @@ POST /ingest ──▶ write document to S3 ──▶ publish pointer to SQS ─
 a message at 256 KB while a document may be larger, so passing the text inline
 would impose an arbitrary limit unrelated to the domain.
 
+**The queue is FIFO, grouped by document id.** This is what makes concurrent
+re-ingest safe — see [Those three steps are not atomic](#those-three-steps-are-not-atomic).
+SQS delivers one message group to one consumer at a time, so two writes to the
+same document serialise while different documents stay parallel. The
+deduplication id is `jobId:docId`, so retrying a job inside the dedup window is
+a no-op rather than a second ingest.
+
 **The worker calls the same `ingestDocuments` the synchronous endpoint calls.**
 No duplicated logic between the two paths.
+
+**Staging and queueing are parallel and batched.** Twenty documents used to mean
+forty sequential AWS round trips inside the 29-second API Gateway timeout that
+async ingest exists to stay under; it is now parallel S3 puts plus two
+`SendMessageBatch` calls. A partial failure names the documents that did not make
+it, so a retry re-queues only those — staging is at-least-once, and the
+deduplication id absorbs the overlap.
+
+**The worker has a reserved concurrency ceiling.** Throttling the API caps how
+fast work is *accepted*, not how many workers run at once. Without a ceiling a
+burst of queued documents fans out to as many concurrent Lambdas as the account
+allows, each one calling the embedding provider. `INGEST_WORKER_CONCURRENCY`
+sets that limit.
 
 **Failures are reported per message** via `batchItemFailures`, so one poisoned
 document does not force SQS to redeliver the whole batch and re-embed — and
 re-pay for — documents that already succeeded. After three attempts a message
-goes to the dead-letter queue.
+goes to the dead-letter queue, which is FIFO because its source queue is.
 
 The queue's visibility timeout is six times the worker timeout, the ratio AWS
 recommends, so a slow document is not redelivered while it is still being
@@ -536,14 +661,26 @@ scale.
 
 ## Trade-offs and known limitations
 
+**Concurrent writes to the same document id are only safe in async mode.** The
+full explanation is under [Those three steps are not atomic](#those-three-steps-are-not-atomic).
+FIFO grouping fixes the async path; the synchronous path would need a lock the
+vector store does not offer.
+
+**Prompt injection is mitigated, not solved.** Three of eight poisoned cases
+still get through. See [Prompt injection](#prompt-injection-mitigated-not-solved)
+for the measurement and why the real fix is not a prompt.
+
 **Secrets are Lambda environment variables.** They are visible in the console and
 in the CloudFormation template. Production should use Secrets Manager or SSM
 Parameter Store with rotation and a runtime fetch. For an exercise the assignment
 describes as "not perfect prod infra, just coherent", the extra cold-start
-complexity was not worth it — but it is the first thing I would change.
+complexity was not worth it — but it is the first infrastructure thing I would
+change.
 
-**CORS allows any origin.** Correct for an exercise with no auth and no fixed
-frontend domain; it should be the actual origin in production.
+**CORS allows any origin, and neither endpoint is authenticated.** Both follow
+the assignment, which specifies no auth. Throttling caps the cost of abuse; it
+does nothing about who may write to the corpus, which is the root of the
+injection exposure above.
 
 **Chunking counts characters, not tokens.** A real tokenizer would be more
 precise at the boundaries. It adds a dependency and meaningful complexity for an
@@ -551,7 +688,8 @@ accuracy gain that does not change behaviour at this scale.
 
 **Synchronous ingest is bounded by API Gateway's 29-second integration timeout.**
 That is exactly what the async mode is for; the synchronous path is the default
-because it is simpler to demonstrate.
+because it is simpler to demonstrate and because it matches the response shape
+the assignment specifies.
 
 **Retrieval is dense-only.** No hybrid search, no reranking, no query rewriting.
 The assignment asks for a correct RAG flow, not a tuned one.
@@ -559,22 +697,29 @@ The assignment asks for a correct RAG flow, not a tuned one.
 **`MIN_SCORE` defaults to 0, disabling the relevance floor.** A fixed cosine
 threshold is a blunt instrument whose right value depends on the embedding model
 and the corpus, and the prompt already instructs the model to refuse. It is
-exposed as configuration rather than guessed at in code.
+exposed as configuration rather than guessed at in code, and the evaluation
+passes it through so a non-zero value is measured rather than assumed.
 
 **There is no way to delete a document.** Re-ingesting with shorter content
 shrinks it, but there is no `DELETE` endpoint.
 
 **Async ingest returns a `jobId` that cannot be queried.** There is no status
-endpoint, so a caller has no way to learn that a queued document failed.
+endpoint, so a caller has no way to learn that a queued document failed. It also
+means a partial enqueue failure is reported once, in the response, and not
+afterwards.
 
-**The evaluation set is small.** Eight cases is enough to have caught three real
-defects, not enough to call the prompt validated. It also costs money to run, so
-it is a local command rather than part of `npm test`.
+**The evaluation suites are small.** Sixteen cases across two suites is enough to
+have caught five real defects, not enough to call the prompt validated. They cost
+money to run, so they are a local command rather than part of `npm test`.
 
 **Pinecone is eventually consistent.** A vector is not always queryable the
 instant an upsert returns. It settles in a second or two in practice, and the
-evaluation script waits before querying. A production system that ingests and
+evaluation waits before querying. A production system that ingests and
 immediately asks would need to handle that explicitly.
+
+**Source maps ship with every function.** `NODE_OPTIONS=--enable-source-maps` is
+set so stack traces are readable, which is worth the package size here; a
+latency-sensitive deployment might prefer to drop both.
 
 **Vitest is pinned to v3.** Vitest 4 does not install with the npm that ships
 with Node 22 — its peer graph trips a resolver bug. `npm audit` reports a
@@ -586,33 +731,36 @@ dependency that never reaches Lambda.
 
 ## If I had more time
 
-**Correctness and retrieval quality**
+**Correctness**
 
-1. **Token-based chunking** with a real tokenizer, so chunk sizes and the context
+1. **Serialise synchronous writes per document**, with a conditional write in
+   DynamoDB keyed by document id, closing the last case the FIFO queue does not
+   cover.
+2. **Authenticate `/ingest`.** Almost everything in the injection section stops
+   being interesting once arbitrary text cannot enter the corpus.
+3. **Token-based chunking** with a real tokenizer, so chunk sizes and the context
    budget are expressed in the unit that actually costs money.
-2. **Hybrid retrieval plus a reranker** — dense vectors miss exact-match queries
+4. **Hybrid retrieval plus a reranker** — dense vectors miss exact-match queries
    like a policy number or an error code, which BM25 catches easily.
-3. **Grow the evaluation set.** Eight cases caught three real defects, which says
-   more about how cheap the first few cases are than about the set being
-   sufficient. The next additions would be adversarial: questions answerable only
-   by combining two passages, near-miss questions that *should* be refused, and
-   documents that contradict each other.
+5. **Grow the evaluation suites**, particularly adversarially: questions
+   answerable only by combining two passages, near-miss questions that *should*
+   be refused, documents that contradict each other, and more injection styles.
 
 **Operability**
 
-4. **Secrets Manager** for the provider keys, with rotation.
-5. **A job status endpoint** for async ingest, so a returned `jobId` is worth
+6. **Secrets Manager** for the provider keys, with rotation.
+7. **A job status endpoint** for async ingest, so a returned `jobId` is worth
    something to the caller.
-6. **Metrics and alarms** — embedded metric format for token spend per request,
+8. **Metrics and alarms** — embedded metric format for token spend per request,
    an alarm on dead-letter queue depth, X-Ray tracing across the SQS hop.
-7. **Idempotency keys on `/ingest`**, so a client retry after a timeout does not
-   re-embed and re-pay for work that already succeeded.
+9. **Idempotency keys on synchronous `/ingest`**, matching what the deduplication
+   id already gives the async path.
 
 **Product**
 
-8. **Document management** — list what is indexed, and delete it.
-9. **File upload with text extraction** (Textract or Tika), which is the listed
-   bonus this implementation skipped.
-10. **Streaming answers** over SSE. The answer is the slowest part of the
+10. **Document management** — list what is indexed, and delete it.
+11. **File upload with text extraction** (Textract or Tika), which is the listed
+    bonus this implementation skipped.
+12. **Streaming answers** over SSE. The answer is the slowest part of the
     request, and streaming changes the perceived latency far more than any
     backend optimisation would.
