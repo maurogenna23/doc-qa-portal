@@ -6,10 +6,13 @@ cdk.out/
 coverage/
 *.tsbuildinfo
 
+# Real secrets. The .example files and apps/web/.env.production are tracked on
+# purpose: the first are templates, the last is a public API URL.
 .env
 .env.local
 .env*.local
 !.env.example
+!apps/web/.env.local.example
 
 .DS_Store
 *.log

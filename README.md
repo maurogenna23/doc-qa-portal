@@ -7,7 +7,12 @@ Next.js + TypeScript on the front, API Gateway and Lambda on the back, Pinecone
 as the vector store, OpenAI for embeddings and completions. The retrieval
 pipeline is written by hand — no LangChain, no LlamaIndex.
 
-**Deployed and running:** `https://rq3ifuxj51.execute-api.us-east-1.amazonaws.com`
+## Try it
+
+| | |
+| --- | --- |
+| **App** | <https://doc-qa-portal.vercel.app> |
+| **API** | `https://rq3ifuxj51.execute-api.us-east-1.amazonaws.com` |
 
 ```bash
 curl -s https://rq3ifuxj51.execute-api.us-east-1.amazonaws.com/ask \
@@ -15,12 +20,18 @@ curl -s https://rq3ifuxj51.execute-api.us-east-1.amazonaws.com/ask \
   -d '{"question":"Can I get a refund on a digital product?","topK":3}'
 ```
 
-That deployment runs with `INGEST_MODE=async`, so `POST /ingest` returns `202`
-and a worker Lambda indexes in the background — it is the bonus pipeline, and
-deploying it is the only way to prove the SQS wiring actually runs. Give it
-about a minute between ingesting and asking: the worker is quick, but Pinecone
-takes longer to make a new vector queryable than it looks (see
-[Trade-offs](#trade-offs-and-known-limitations)). `INGEST_MODE=sync` is one
+The index already holds a few sample documents — a refund policy, warranty terms
+and a vacation policy — so the app answers something out of the box. Add your
+own on the Documents page.
+
+**One thing to expect.** The deployment runs with `INGEST_MODE=async`, so
+`POST /ingest` returns `202` and a worker Lambda indexes in the background. That
+is the bonus pipeline, and deploying it is the only way to prove the SQS wiring
+actually runs. Allow about a minute between adding a document and asking about
+it: the worker is fast, but Pinecone takes longer to make a new vector queryable
+than you would guess — see [Trade-offs](#trade-offs-and-known-limitations).
+Asking too early returns the refusal rather than an error, which is correct and
+looks like a bug if you are not expecting it. `INGEST_MODE=sync` is one
 environment variable away and returns the response shape in the spec.
 
 ---
@@ -386,6 +397,13 @@ and exercised there:
 - The structured JSON logs arrive in CloudWatch in the shape the logging section
   describes.
 
+The frontend was then deployed to Vercel and driven through a browser with no
+session: a document added on `/docs` returned the queued acknowledgement with
+its job id, the worker picked it up, and the question it answers returned the
+right answer citing that document and only that document — the whole chain,
+browser to Vercel to API Gateway to Lambda to SQS to a second Lambda to Pinecone
+and back.
+
 ## Deploying to AWS
 
 ```bash
@@ -404,6 +422,23 @@ worker, and wires their environment variables automatically.
 ```bash
 npx cdk destroy          # removes everything, including the bucket contents
 ```
+
+### Deploying the frontend
+
+```bash
+npx vercel login
+npx vercel link --yes --project doc-qa-portal
+npx vercel --prod --yes
+```
+
+Run these from the repository root, not from `apps/web`. The web app is a
+workspace that depends on `@docqa/contracts`, so a build scoped to `apps/web`
+alone cannot resolve it; `vercel.json` installs and builds from the root and
+points the platform at `apps/web/.next`.
+
+`apps/web/.env.production` carries the API base URL, so a clone builds against
+the deployed API with no dashboard configuration. Set `NEXT_PUBLIC_API_BASE_URL`
+as a platform environment variable to point a deployment somewhere else.
 
 #### A fresh AWS account cannot reserve Lambda concurrency
 
