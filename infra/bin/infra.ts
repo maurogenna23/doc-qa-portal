@@ -44,13 +44,13 @@ function requiredSetting(name: string): string {
  * API_RATE_LIMIT silently produced a stage with no throttling at all and a
  * synth that exited 0 — the opposite of the guardrail it was meant to be.
  */
-function numericSetting(name: string, fallback: number): number {
+function numericSetting(name: string, fallback: number, minimum = 1): number {
   const raw = setting(name);
   if (raw === undefined) return fallback;
 
   const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive integer, received "${raw}".`);
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(`${name} must be an integer of at least ${minimum}, received "${raw}".`);
   }
   return value;
 }
@@ -87,5 +87,7 @@ new DocQaStack(app, 'DocQaStack', {
   ingestMode,
   rateLimit: numericSetting('API_RATE_LIMIT', 10),
   burstLimit: numericSetting('API_BURST_LIMIT', 20),
-  workerConcurrency: numericSetting('INGEST_WORKER_CONCURRENCY', 5),
+  // Defaults to 0, meaning no reservation: a fresh AWS account cannot satisfy
+  // one. See DocQaStackProps.workerConcurrency.
+  workerConcurrency: numericSetting('INGEST_WORKER_CONCURRENCY', 0, 0),
 });

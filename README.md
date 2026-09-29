@@ -7,6 +7,22 @@ Next.js + TypeScript on the front, API Gateway and Lambda on the back, Pinecone
 as the vector store, OpenAI for embeddings and completions. The retrieval
 pipeline is written by hand — no LangChain, no LlamaIndex.
 
+**Deployed and running:** `https://rq3ifuxj51.execute-api.us-east-1.amazonaws.com`
+
+```bash
+curl -s https://rq3ifuxj51.execute-api.us-east-1.amazonaws.com/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Can I get a refund on a digital product?","topK":3}'
+```
+
+That deployment runs with `INGEST_MODE=async`, so `POST /ingest` returns `202`
+and a worker Lambda indexes in the background — it is the bonus pipeline, and
+deploying it is the only way to prove the SQS wiring actually runs. Give it
+about a minute between ingesting and asking: the worker is quick, but Pinecone
+takes longer to make a new vector queryable than it looks (see
+[Trade-offs](#trade-offs-and-known-limitations)). `INGEST_MODE=sync` is one
+environment variable away and returns the response shape in the spec.
+
 ---
 
 ## How it works
@@ -142,7 +158,7 @@ that can disagree.
 | `INGEST_QUEUE_URL` | async only | — | Set automatically by CDK |
 | `API_RATE_LIMIT` | no | `10` | API Gateway steady-state requests/second |
 | `API_BURST_LIMIT` | no | `20` | API Gateway burst ceiling |
-| `INGEST_WORKER_CONCURRENCY` | no | `5` | Ceiling on concurrent ingest workers, and so on concurrent provider calls |
+| `INGEST_WORKER_CONCURRENCY` | no | `0` | Reserved concurrency for the ingest worker. `0` means no reservation — see [Deploying to AWS](#deploying-to-aws) |
 | `PINECONE_CLOUD` | no | `aws` | Only read by `npm run setup:pinecone` |
 | `PINECONE_REGION` | no | `us-east-1` | Only read by `npm run setup:pinecone` |
 | `PORT` | no | `4000` | Local API server port |
@@ -353,8 +369,22 @@ Pinecone index and the OpenAI API:
 
 The stack was synthesised in both `sync` and `async` modes, the generated IAM
 policies were read to confirm the ingest and worker roles cannot do each other's
-job, and the template was checked for FIFO queues, the worker's reserved
-concurrency and the throttling settings.
+job, and the template was checked for FIFO queues and the throttling settings.
+
+**It was then deployed for real**, in `async` mode, to a dedicated AWS account,
+and exercised there:
+
+- `POST /ingest` returned `202`; CloudWatch shows the worker Lambda picking both
+  documents off the FIFO queue and indexing them — in two separate invocations,
+  because they are different message groups and only same-group messages
+  serialise.
+- `POST /ask` answered both questions correctly, each citing one document, and
+  refused the question the corpus does not answer.
+- The error paths return what this README says they return: `400` with field
+  detail for a missing question, an empty body and malformed JSON, `400` for a
+  multi-line title, and a `204` CORS preflight.
+- The structured JSON logs arrive in CloudWatch in the shape the logging section
+  describes.
 
 ## Deploying to AWS
 
@@ -374,6 +404,24 @@ worker, and wires their environment variables automatically.
 ```bash
 npx cdk destroy          # removes everything, including the bucket contents
 ```
+
+#### A fresh AWS account cannot reserve Lambda concurrency
+
+Worth knowing before you deploy, because it cost me a failed rollback on the
+first real attempt.
+
+The ingest worker has a reserved-concurrency setting, because throttling the API
+caps how fast work is *accepted* and not how many workers run at once. But a new
+AWS account has a concurrent-execution limit of **10**, not the usual 1000, and
+AWS refuses any reservation that would leave fewer than 100 unreserved. A
+hardcoded reservation therefore makes the stack undeployable on exactly the kind
+of account someone evaluating it would use.
+
+So `INGEST_WORKER_CONCURRENCY` defaults to `0`, meaning no reservation. On a
+constrained account the account limit is itself the ceiling; on a mature one,
+set it. `cdk synth` cannot catch this — the template is valid, the account is
+not — which is the argument for deploying at least once rather than trusting a
+synth.
 
 **What the stack creates**
 

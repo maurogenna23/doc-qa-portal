@@ -30,7 +30,17 @@ export interface DocQaStackProps extends StackProps {
   /** Steady-state requests per second allowed through the API. */
   rateLimit: number;
   burstLimit: number;
-  /** Ceiling on concurrent ingest workers, and so on concurrent provider calls. */
+  /**
+   * Ceiling on concurrent ingest workers, and so on concurrent provider calls.
+   *
+   * Zero means no reservation. That is the default, and it is not laziness: a
+   * fresh AWS account has a concurrent-execution limit of 10 rather than the
+   * usual 1000, and AWS refuses any reservation that would leave fewer than 100
+   * unreserved. A hardcoded reservation therefore makes this stack impossible
+   * to deploy on a new account — which is where anyone evaluating it will try
+   * first. On such an account the account limit is itself the ceiling; on a
+   * mature one, set this.
+   */
   workerConcurrency: number;
 }
 
@@ -180,7 +190,12 @@ export class DocQaStack extends Stack {
         // workers run at once. Without a reserved ceiling, a burst of queued
         // documents fans out to as many concurrent Lambdas as the account
         // allows, and every one of them calls the embedding provider.
-        reservedConcurrentExecutions: props.workerConcurrency,
+        //
+        // Zero disables the reservation; see the prop's documentation for why
+        // that is the default.
+        ...(props.workerConcurrency > 0
+          ? { reservedConcurrentExecutions: props.workerConcurrency }
+          : {}),
       });
 
       // Least privilege: the API may only stage and enqueue, the worker may
