@@ -1,0 +1,27 @@
+{
+  "name": "docqa-portal",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Doc Q&A portal: Next.js + API Gateway/Lambda + Pinecone RAG",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "infra",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "npm run test --workspace @docqa/api",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run typecheck",
+    "dev:api": "npm run dev --workspace @docqa/api",
+    "dev:web": "npm run dev --workspace @docqa/web",
+    "build:web": "npm run build --workspace @docqa/web",
+    "cdk": "npm run cdk --workspace @docqa/infra"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

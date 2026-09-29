@@ -1,0 +1,16 @@
+node_modules/
+.next/
+dist/
+out/
+cdk.out/
+coverage/
+*.tsbuildinfo
+
+.env
+.env.local
+.env*.local
+!.env.example
+
+.DS_Store
+*.log
+npm-debug.log*
