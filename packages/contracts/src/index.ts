@@ -6,6 +6,29 @@
  */
 
 // ---------------------------------------------------------------------------
+// Limits
+// ---------------------------------------------------------------------------
+
+/**
+ * The size and range limits the API enforces.
+ *
+ * They live in the contract because both sides need them: the API rejects what
+ * exceeds them, and the web app has to tell a user their file is too large
+ * before spending a round trip to find out. A client that hardcoded its own
+ * copy would drift from the server the first time one changed.
+ */
+export const LIMITS = {
+  maxDocumentsPerRequest: 20,
+  maxDocIdChars: 128,
+  maxTitleChars: 256,
+  maxContentChars: 50_000,
+  maxQuestionChars: 1_000,
+  minTopK: 1,
+  maxTopK: 10,
+  defaultTopK: 3,
+} as const;
+
+// ---------------------------------------------------------------------------
 // POST /ingest
 // ---------------------------------------------------------------------------
 

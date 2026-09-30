@@ -76,6 +76,7 @@ services/api
   src/handlers          Lambda entry points (ingest, ask, SQS worker)
   src/local             dev server that invokes the real handlers
   test                  unit tests (144)
+apps/web/test         unit tests for the browser-side extraction (41)
 infra                   AWS CDK stack
 apps/web                Next.js app
 ```
@@ -88,7 +89,7 @@ implements those interfaces against real services.
 
 That boundary buys three concrete things:
 
-1. **The pipeline is testable without a network or an API key.** All 144 tests run
+1. **The pipeline is testable without a network or an API key.** All 185 tests run
    in under a second against in-memory doubles.
 2. **The SQS worker reuses the pipeline unchanged.** Async ingest changes *when*
    the work happens, not *what* the work is, so the bonus cost almost nothing.
@@ -302,7 +303,7 @@ provider text is absent from the body, and that it is present in the log.
 npm test
 ```
 
-144 unit tests, all against in-memory doubles, so they need no credentials and
+185 unit tests, all against in-memory doubles, so they need no credentials and
 cost nothing to run. They cover:
 
 - **chunking** — determinism, sentence-boundary splitting, hard-splitting a
@@ -375,6 +376,10 @@ Pinecone index and the OpenAI API:
 - **Prompt injection**, measured as the table under
   [Prompt injection](#prompt-injection-mitigated-not-solved) reports it, through
   both the document body and the title.
+- **File extraction**, with a real PDF, a real `.docx`, a `.txt` and a `.md`
+  dropped into the deployed page: four cards with ids and titles derived from
+  the file names, ingested, and then answerable — the PDF's text matching
+  `pdftotext` on the same file, character for character.
 - **A partial enqueue failure**, confirming the response names the documents that
   did not make it while the underlying AWS error stays in the log.
 
@@ -699,6 +704,38 @@ unauthenticated public endpoint being abused for *volume*, and said nothing abou
 it being abused for *content*. The same endpoint, the same threat model, one half
 considered.
 
+### Reading files in the browser
+
+`/docs` accepts `.pdf`, `.docx`, `.txt` and `.md`. The text is extracted in the
+browser and only the extracted text is sent to `POST /ingest`; the file itself
+never leaves the page.
+
+That is a deliberate choice against the obvious alternative of uploading to S3
+and extracting in a Lambda. The assignment lists Tika beside Textract as
+acceptable, and Tika extracts text without OCR — so the bonus is about reading
+documents, not about reading images of documents. Once OCR is out of scope,
+extracting client-side needs no upload endpoint, no presigned URLs, no binary
+through API Gateway's payload limit, no extra IAM and no per-page cost, and it
+leaves the deployed architecture untouched. The parsers are dynamically
+imported, so their weight is only paid by someone who actually drops a file.
+
+Each file becomes its own editable card, with the id and title derived from the
+file name — `Refund Policy (2024).pdf` becomes `refund-policy-2024` and
+"Refund Policy (2024)", because the API only accepts letters, digits and
+`. _ : -`. Files are read in parallel and failures reported per file, so one
+unreadable document does not discard the four beside it.
+
+**A scanned PDF is detected, not silently ingested.** Pages that are images
+carry no text layer, extraction yields nothing, and the user is told that
+reading it would need OCR rather than being handed an empty document.
+
+One detail worth recording, because it only shows up on a real file: a PDF's
+text layer is positioned fragments, not words. Joining them with a space
+inserts one inside any word the layout split — a real PDF produced
+`purchas e is made`. pdfjs already carries spacing within each fragment and
+flags line ends, so the fragments are concatenated and `hasEOL` honoured
+instead; the output then matches `pdftotext` exactly.
+
 ### Cost guardrails
 
 The endpoints are unauthenticated, as the assignment specifies. Input limits and
@@ -853,6 +890,15 @@ and the corpus, and the prompt already instructs the model to refuse. It is
 exposed as configuration rather than guessed at in code, and the evaluation
 passes it through so a non-zero value is measured rather than assumed.
 
+**Scanned documents are not supported.** Extraction reads a PDF's text layer;
+a page that is an image has none. OCR would mean Textract or equivalent, which
+is server-side, priced per page, and beyond what the bonus describes. The case
+is detected and reported rather than ingested as an empty document.
+
+**`.doc` and `.pages` are not supported either** — only the modern `.docx`.
+The file picker says so and an unsupported file is rejected by name before it
+is read.
+
 **There is no way to delete a document.** Re-ingesting with shorter content
 shrinks it, but there is no `DELETE` endpoint.
 
@@ -918,8 +964,8 @@ dependency that never reaches Lambda.
 **Product**
 
 10. **Document management** — list what is indexed, and delete it.
-11. **File upload with text extraction** (Textract or Tika), which is the listed
-    bonus this implementation skipped.
+11. **OCR for scanned documents**, which is the one part of the file-upload
+    bonus this implementation does not cover.
 12. **Streaming answers** over SSE. The answer is the slowest part of the
     request, and streaming changes the perceived latency far more than any
     backend optimisation would.

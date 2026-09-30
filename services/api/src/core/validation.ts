@@ -1,23 +1,9 @@
-import type { IngestDocumentInput } from '@docqa/contracts';
+import { LIMITS, type IngestDocumentInput } from '@docqa/contracts';
 import { PayloadTooLargeError, ValidationError } from './errors.js';
 
-/**
- * Cost and abuse guardrails, enforced before a single token is spent.
- *
- * The endpoints are intentionally unauthenticated (per the assignment), so
- * input limits plus API Gateway throttling are what stand between a public URL
- * and a surprise bill.
- */
-export const LIMITS = {
-  maxDocumentsPerRequest: 20,
-  maxDocIdChars: 128,
-  maxTitleChars: 256,
-  maxContentChars: 50_000,
-  maxQuestionChars: 1_000,
-  minTopK: 1,
-  maxTopK: 10,
-  defaultTopK: 3,
-} as const;
+// Re-exported so the rest of the core keeps importing limits from one place.
+// They are defined in @docqa/contracts because the web app needs them too.
+export { LIMITS } from '@docqa/contracts';
 
 /**
  * Document ids end up inside vector ids as `${docId}#chunk-N`, so `#` is

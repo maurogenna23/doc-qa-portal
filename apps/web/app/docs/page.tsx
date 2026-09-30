@@ -1,8 +1,16 @@
 'use client';
 
 import type { IngestDocumentInput, IngestResponse } from '@docqa/contracts';
-import { useId, useRef, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type DragEvent, type FormEvent } from 'react';
 import { ingestDocuments } from '@/lib/api';
+import {
+  ACCEPTED_FILE_TYPES,
+  deriveDocumentId,
+  deriveTitle,
+  extractText,
+  FileExtractionError,
+  SUPPORTED_EXTENSIONS,
+} from '@/lib/extract';
 import { ErrorNotice } from '../error-notice';
 
 /** Local editor state: one entry per document card, with a stable key for React. */
@@ -21,6 +29,14 @@ function emptyDraft(key: string): DocumentDraft {
   return { key, id: '', title: '', content: '' };
 }
 
+function isBlank(draft: DocumentDraft): boolean {
+  return (
+    draft.id.trim().length === 0 ||
+    draft.title.trim().length === 0 ||
+    draft.content.trim().length === 0
+  );
+}
+
 function summarise(result: IngestResponse): string {
   if (result.status === 'queued') {
     return `Queued ${result.ingestedDocuments} document(s) for background ingest. Job ${result.jobId}.`;
@@ -32,10 +48,14 @@ export default function DocumentsPage() {
   const baseId = useId();
   // Cards added after the first exist only on the client, so a counter is safe.
   const nextCard = useRef(1);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [drafts, setDrafts] = useState<DocumentDraft[]>(() => [emptyDraft(`${baseId}-0`)]);
   const [result, setResult] = useState<IngestResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [pending, setPending] = useState(false);
+  const [reading, setReading] = useState(false);
+  const [fileProblems, setFileProblems] = useState<string[]>([]);
+  const [dragging, setDragging] = useState(false);
 
   const addCard = () => emptyDraft(`${baseId}-${nextCard.current++}`);
 
@@ -43,6 +63,72 @@ export default function DocumentsPage() {
     setDrafts((current) =>
       current.map((draft) => (draft.key === key ? { ...draft, [field]: value } : draft)),
     );
+  }
+
+  /**
+   * Turns dropped files into cards.
+   *
+   * Each file gets its own card with the id and title derived from its name, so
+   * the result is editable rather than submitted behind the user's back. Files
+   * are read in parallel and reported individually: one unreadable scan should
+   * not discard the four documents beside it.
+   */
+  async function handleFiles(files: FileList | null) {
+    if (files === null || files.length === 0) return;
+
+    setReading(true);
+    setFileProblems([]);
+    setError(null);
+    setResult(null);
+
+    const outcomes = await Promise.all(
+      Array.from(files).map(async (file) => {
+        try {
+          return { file, content: await extractText(file) };
+        } catch (caught) {
+          const message =
+            caught instanceof FileExtractionError
+              ? `${caught.fileName}: ${caught.message}`
+              : `${file.name}: could not be read.`;
+          return { file, problem: message };
+        }
+      }),
+    );
+
+    const added: DocumentDraft[] = [];
+    const problems: string[] = [];
+
+    for (const outcome of outcomes) {
+      if ('problem' in outcome && outcome.problem !== undefined) {
+        problems.push(outcome.problem);
+        continue;
+      }
+      if (!('content' in outcome)) continue;
+
+      added.push({
+        ...addCard(),
+        id: deriveDocumentId(outcome.file.name),
+        title: deriveTitle(outcome.file.name),
+        content: outcome.content,
+      });
+    }
+
+    // Replace the untouched starter card rather than leaving it empty above the
+    // files, which would block submission on a card the user never filled in.
+    setDrafts((current) => {
+      const kept = current.filter((draft) => !isBlank(draft));
+      const next = [...kept, ...added];
+      return next.length > 0 ? next : [addCard()];
+    });
+    setFileProblems(problems);
+    setReading(false);
+    if (fileInput.current !== null) fileInput.current.value = '';
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDragging(false);
+    void handleFiles(event.dataTransfer.files);
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -57,6 +143,7 @@ export default function DocumentsPage() {
       );
       setResult(response);
       setDrafts([addCard()]);
+      setFileProblems([]);
     } catch (caught) {
       setError(caught);
     } finally {
@@ -64,20 +151,61 @@ export default function DocumentsPage() {
     }
   }
 
-  const incomplete = drafts.some(
-    (draft) =>
-      draft.id.trim().length === 0 ||
-      draft.title.trim().length === 0 ||
-      draft.content.trim().length === 0,
-  );
+  const incomplete = drafts.some(isBlank);
 
   return (
     <>
       <h1>Add documents</h1>
       <p className="lede">
-        Plain text only. Re-using a document id replaces that document rather than adding a second
-        copy of it.
+        Drop a file or type the text in. Re-using a document id replaces that document rather than
+        adding a second copy of it.
       </p>
+
+      <div
+        className={`dropzone${dragging ? ' dragging' : ''}`}
+        onDragOver={(event) => {
+          event.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={handleDrop}
+      >
+        <input
+          ref={fileInput}
+          id="files"
+          type="file"
+          multiple
+          accept={ACCEPTED_FILE_TYPES}
+          onChange={(event) => void handleFiles(event.target.files)}
+          hidden
+        />
+        <p className="dropzone-title">
+          {reading ? 'Reading files…' : 'Drop files here'}
+        </p>
+        <p className="hint">
+          {SUPPORTED_EXTENSIONS.join(', ')} — text is extracted in your browser, so the file itself
+          never leaves this page.
+        </p>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => fileInput.current?.click()}
+          disabled={reading}
+        >
+          Choose files
+        </button>
+      </div>
+
+      {fileProblems.length > 0 && (
+        <div className="notice error" role="alert">
+          <strong>Some files could not be read</strong>
+          <ul>
+            {fileProblems.map((problem) => (
+              <li key={problem}>{problem}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit}>
         {drafts.map((draft, index) => (
@@ -121,7 +249,12 @@ export default function DocumentsPage() {
             </div>
 
             <div className="field" style={{ marginBottom: 0 }}>
-              <label htmlFor={`content-${draft.key}`}>Content</label>
+              <label htmlFor={`content-${draft.key}`}>
+                Content
+                {draft.content.length > 0 && (
+                  <span className="char-count"> {draft.content.length.toLocaleString()} characters</span>
+                )}
+              </label>
               <textarea
                 id={`content-${draft.key}`}
                 value={draft.content}
@@ -138,11 +271,7 @@ export default function DocumentsPage() {
           <button type="submit" disabled={pending || incomplete}>
             {pending ? 'Ingesting…' : 'Ingest'}
           </button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => setDrafts((current) => [...current, addCard()])}
-          >
+          <button type="button" className="secondary" onClick={() => setDrafts((c) => [...c, addCard()])}>
             Add another
           </button>
         </div>

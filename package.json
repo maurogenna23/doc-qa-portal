@@ -13,7 +13,7 @@
     "apps/*"
   ],
   "scripts": {
-    "test": "npm run test --workspace @docqa/api",
+    "test": "npm run test --workspaces --if-present",
     "setup:pinecone": "npm run setup:pinecone --workspace @docqa/api",
     "eval": "npm run eval --workspace @docqa/api",
     "typecheck": "npm run typecheck --workspaces --if-present",
