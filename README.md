@@ -9,10 +9,10 @@ pipeline is written by hand — no LangChain, no LlamaIndex.
 
 ## Try it
 
-| | |
-| --- | --- |
-| **App** | <https://doc-qa-portal.vercel.app> |
-| **API** | `https://rq3ifuxj51.execute-api.us-east-1.amazonaws.com` |
+**App:** <https://doc-qa-portal.vercel.app>
+
+The API is two POST routes and nothing else — there is no browsable root, so a
+URL in an address bar answers `404`. It is meant to be called:
 
 ```bash
 curl -s https://rq3ifuxj51.execute-api.us-east-1.amazonaws.com/ask \
