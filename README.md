@@ -393,6 +393,13 @@ Pinecone index and the OpenAI API:
   dropped into the deployed page: four cards with ids and titles derived from
   the file names, ingested, and then answerable — the PDF's text matching
   `pdftotext` on the same file, character for character.
+- **The guards around it**, in the deployed page: `informe.txt` and
+  `informe.md` producing two distinct ids rather than colliding on one, a PDF
+  renamed `.txt` refused by its contents, twenty-five dropped files becoming
+  twenty cards and one message about the other five, and two cards forced to
+  share an id blocking submission with the reason shown.
+- **Replacement reporting**, through the synchronous API: the same id ingested
+  twice returned `replacedDocuments: 0` and then `1`.
 - **A partial enqueue failure**, confirming the response names the documents that
   did not make it while the underlying AWS error stays in the log.
 
