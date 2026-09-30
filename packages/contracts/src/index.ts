@@ -49,6 +49,14 @@ export interface IngestCompletedResponse {
   status: 'completed';
   ingestedDocuments: number;
   ingestedChunks: number;
+  /**
+   * How many of those documents replaced one already in the index.
+   *
+   * Replacement is the documented behaviour of re-using an id, but it destroys
+   * the previous version, and an operation that destroys something should say
+   * so rather than report the same success as a first-time write.
+   */
+  replacedDocuments: number;
 }
 
 /**
@@ -152,7 +160,12 @@ export function isIngestResponse(value: unknown): value is IngestResponse {
   const candidate = value as Record<string, unknown>;
   if (typeof candidate['ingestedDocuments'] !== 'number') return false;
 
-  if (candidate['status'] === 'completed') return typeof candidate['ingestedChunks'] === 'number';
+  if (candidate['status'] === 'completed') {
+    return (
+      typeof candidate['ingestedChunks'] === 'number' &&
+      typeof candidate['replacedDocuments'] === 'number'
+    );
+  }
   if (candidate['status'] === 'queued') {
     return candidate['ingestedChunks'] === null && typeof candidate['jobId'] === 'string';
   }

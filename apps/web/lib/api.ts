@@ -48,6 +48,16 @@ async function post<T>(path: string, body: unknown, isExpected: (value: unknown)
         payload.error.details ?? [],
       );
     }
+    // 429 and 503 come from API Gateway, not from the app, so they arrive
+    // outside the error contract. Telling someone to try again beats handing
+    // them a status code.
+    if (response.status === 429 || response.status === 503) {
+      throw new ApiRequestError(
+        'INTERNAL_ERROR',
+        'The service is busy right now. Wait a moment and try again.',
+      );
+    }
+
     throw new ApiRequestError('INTERNAL_ERROR', `Request failed with status ${response.status}.`);
   }
 

@@ -22,6 +22,8 @@ export interface IngestDeps {
 export interface IngestResult {
   ingestedDocuments: number;
   ingestedChunks: number;
+  /** Of those, how many overwrote a document the store already held. */
+  replacedDocuments: number;
 }
 
 /** One HTTP round trip per batch instead of one per chunk. */
@@ -110,6 +112,7 @@ export async function ingestDocuments(
 
   let ingestedDocuments = 0;
   let ingestedChunks = 0;
+  let replacedDocuments = 0;
   let totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   for (const document of documents) {
@@ -165,6 +168,7 @@ export async function ingestDocuments(
 
     ingestedDocuments += 1;
     ingestedChunks += records.length;
+    if (previousIds.length > 0) replacedDocuments += 1;
     logger.info('Ingested document.', {
       docId: document.id,
       chunks: records.length,
@@ -175,6 +179,7 @@ export async function ingestDocuments(
   logger.info('Ingest complete.', {
     documents: ingestedDocuments,
     submitted: documents.length,
+    replaced: replacedDocuments,
     chunks: ingestedChunks,
     embeddingModel: embeddings.model,
     embeddingTokens: totalUsage.totalTokens,
@@ -182,5 +187,5 @@ export async function ingestDocuments(
 
   // Counts what was actually indexed, not what was submitted: a document
   // that produced no chunks was not ingested, whatever the request said.
-  return { ingestedDocuments, ingestedChunks };
+  return { ingestedDocuments, ingestedChunks, replacedDocuments };
 }

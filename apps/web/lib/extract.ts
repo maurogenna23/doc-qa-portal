@@ -35,8 +35,11 @@ export class FileExtractionError extends Error {
 }
 
 export function extensionOf(fileName: string): string {
-  const dot = fileName.lastIndexOf('.');
-  return dot === -1 ? '' : fileName.slice(dot).toLowerCase();
+  const withoutPath = fileName.split(/[/\\]/).pop() ?? fileName;
+  const dot = withoutPath.lastIndexOf('.');
+  // A leading dot makes a hidden file, not an extension: ".gitignore" is a
+  // name, and treating "gitignore" as its type would be wrong.
+  return dot <= 0 ? '' : withoutPath.slice(dot).toLowerCase();
 }
 
 export function isSupported(fileName: string): boolean {
@@ -45,28 +48,42 @@ export function isSupported(fileName: string): boolean {
 
 function baseName(fileName: string): string {
   const withoutPath = fileName.split(/[/\\]/).pop() ?? fileName;
-  const dot = withoutPath.lastIndexOf('.');
-  return dot <= 0 ? withoutPath : withoutPath.slice(0, dot);
+  const extension = extensionOf(withoutPath);
+  return extension === '' ? withoutPath : withoutPath.slice(0, -extension.length);
+}
+
+/** Reduces arbitrary text to the characters the API accepts in a document id. */
+function slugify(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '');
 }
 
 /**
- * A document id derived from the file name.
+ * A document id derived from the file name, including its extension.
  *
  * The API only accepts letters, digits and `. _ : -`, and reserves `#`, so a
  * file called "Refund Policy (2024).pdf" has to become something legal before
  * it is offered as an id. The user can always edit it.
+ *
+ * The extension is part of the id on purpose. Re-ingesting an id replaces that
+ * document, which is right when a person chooses the id and dangerous when an
+ * app derives it: dropping `report.pdf` today and `report.docx` tomorrow would
+ * have destroyed the first with no warning. Including the extension keeps the
+ * property that matters — the same file re-uploaded still replaces itself —
+ * while two different files stop colliding just because they share a stem.
  */
 export function deriveDocumentId(fileName: string): string {
-  const slug = baseName(fileName)
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9._:-]+/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^[-.]+|[-.]+$/g, '')
-    .slice(0, LIMITS.maxDocIdChars);
+  const stem = slugify(baseName(fileName));
+  const extension = slugify(extensionOf(fileName));
+  const name = stem.length > 0 ? stem : 'document';
 
-  return slug.length > 0 ? slug : 'document';
+  const id = extension.length > 0 ? `${name}.${extension}` : name;
+  return id.slice(0, LIMITS.maxDocIdChars);
 }
 
 /**
@@ -152,6 +169,44 @@ async function extractDocx(file: File): Promise<string> {
   return value;
 }
 
+/** The first bytes a format must start with, when it has a recognisable signature. */
+const FILE_SIGNATURES: Record<string, { bytes: readonly number[]; label: string }> = {
+  '.pdf': { bytes: [0x25, 0x50, 0x44, 0x46], label: 'a PDF' }, // %PDF
+  '.docx': { bytes: [0x50, 0x4b, 0x03, 0x04], label: 'a DOCX' }, // PK\x03\x04
+};
+
+/**
+ * Checks the file actually is what its extension claims.
+ *
+ * Dispatching on the extension alone was asymmetric: text renamed `.pdf` was
+ * caught by the parser, but a PDF renamed `.txt` sailed through `file.text()`
+ * and put twelve thousand characters of binary into the index. The check runs
+ * in both directions — a signature where the format has one, and a scan for
+ * NUL bytes where it does not, since plain text never contains them.
+ */
+async function assertContentMatchesExtension(file: File, extension: string): Promise<void> {
+  const head = new Uint8Array(await file.slice(0, 4096).arrayBuffer());
+
+  const signature = FILE_SIGNATURES[extension];
+  if (signature !== undefined) {
+    const matches = signature.bytes.every((byte, index) => head[index] === byte);
+    if (!matches) {
+      throw new FileExtractionError(
+        file.name,
+        `The contents are not ${signature.label}, whatever the extension says.`,
+      );
+    }
+    return;
+  }
+
+  if (head.includes(0)) {
+    throw new FileExtractionError(
+      file.name,
+      'The contents are binary, not text, whatever the extension says.',
+    );
+  }
+}
+
 /** Reads a file and returns the plain text to ingest. */
 export async function extractText(file: File): Promise<string> {
   if (file.size > MAX_FILE_BYTES) {
@@ -168,6 +223,8 @@ export async function extractText(file: File): Promise<string> {
       `${extension === '' ? 'Files without an extension' : `${extension} files`} are not supported. Use ${SUPPORTED_EXTENSIONS.join(', ')}.`,
     );
   }
+
+  await assertContentMatchesExtension(file, extension);
 
   let raw: string;
   try {

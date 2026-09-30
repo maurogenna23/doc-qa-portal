@@ -1,6 +1,7 @@
 import { LIMITS } from '@docqa/contracts';
 import { describe, expect, it } from 'vitest';
 import {
+  extractText,
   deriveDocumentId,
   deriveTitle,
   extensionOf,
@@ -28,6 +29,8 @@ describe('extensionOf', () => {
     ['Refund.PDF', '.pdf'],
     ['report.final.docx', '.docx'],
     ['README', ''],
+    ['.gitignore', ''],
+    ['/a/b/report.pdf', '.pdf'],
   ])('reads %s as %s', (name, expected) => {
     expect(extensionOf(name)).toBe(expected);
   });
@@ -47,18 +50,36 @@ describe('isSupported', () => {
 
 describe('deriveDocumentId', () => {
   it.each([
-    ['Refund Policy (2024).pdf', 'refund-policy-2024'],
-    ['Refund Policy.pdf', 'refund-policy'],
-    ['weird   spacing.txt', 'weird-spacing'],
-    ['UPPER_CASE_NAME.md', 'upper_case_name'],
-    ['/Users/me/docs/nested file.txt', 'nested-file'],
+    ['Refund Policy (2024).pdf', 'refund-policy-2024.pdf'],
+    ['Refund Policy.pdf', 'refund-policy.pdf'],
+    ['weird   spacing.txt', 'weird-spacing.txt'],
+    ['UPPER_CASE_NAME.md', 'upper_case_name.md'],
+    ['/Users/me/docs/nested file.txt', 'nested-file.txt'],
   ])('turns %s into %s', (name, expected) => {
     expect(deriveDocumentId(name)).toBe(expected);
   });
 
+  it('gives the same stem in different formats different ids', () => {
+    // Regression guard. Re-using an id replaces that document, which is right
+    // when a person picks the id and destructive when an app derives it from a
+    // file name: report.pdf today and report.docx tomorrow silently destroyed
+    // the first. The extension is part of the id for exactly this reason.
+    const ids = ['report.pdf', 'report.docx', 'report.md', 'report.txt'].map(deriveDocumentId);
+
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('still gives the same file the same id, so re-uploading it replaces it', () => {
+    expect(deriveDocumentId('/a/b/report.pdf')).toBe(deriveDocumentId('/c/report.pdf'));
+  });
+
+  it('does not leave a separator stranded beside the extension', () => {
+    expect(deriveDocumentId('Refund Policy (2024).pdf')).not.toContain('-.');
+  });
+
   it('strips accents rather than dropping the words carrying them', () => {
-    expect(deriveDocumentId('Poliza de Devolucion.docx')).toBe('poliza-de-devolucion');
-    expect(deriveDocumentId('Póliza de Devolución.docx')).toBe('poliza-de-devolucion');
+    expect(deriveDocumentId('Poliza de Devolucion.docx')).toBe('poliza-de-devolucion.docx');
+    expect(deriveDocumentId('Póliza de Devolución.docx')).toBe('poliza-de-devolucion.docx');
   });
 
   it('never produces an id containing the reserved chunk separator', () => {
@@ -75,14 +96,15 @@ describe('deriveDocumentId', () => {
     },
   );
 
-  it('keeps a dotfile name rather than discarding it', () => {
-    // The whole name is the base name for a dotfile, which is what makes
-    // ".gitignore" an id at all.
+  it('treats a leading dot as a hidden file, not an extension', () => {
+    // ".gitignore" is a name. Reading "gitignore" as its type would be wrong,
+    // and would produce the id "gitignore.gitignore".
+    expect(extensionOf('.gitignore')).toBe('');
     expect(deriveDocumentId('.gitignore')).toBe('gitignore');
   });
 
   it('falls back when nothing usable is left', () => {
-    expect(deriveDocumentId('###.txt')).toBe('document');
+    expect(deriveDocumentId('###.txt')).toBe('document.txt');
   });
 
   it('respects the id length limit', () => {
@@ -147,5 +169,45 @@ describe('normaliseExtractedText', () => {
 
   it('returns an empty string for whitespace only, which callers treat as no text', () => {
     expect(normaliseExtractedText('   \n\n \t ')).toBe('');
+  });
+});
+
+describe('extractText and mismatched contents', () => {
+  /**
+   * Dispatching on the extension alone was asymmetric: text renamed .pdf was
+   * caught by the parser, a PDF renamed .txt was read as text and put twelve
+   * thousand characters of binary into the index.
+   */
+  const asFile = (bytes: Uint8Array | string, name: string) =>
+    new File([bytes as BlobPart], name);
+
+  it('reads a genuine text file', async () => {
+    await expect(extractText(asFile('Refunds take 30 days.', 'policy.txt'))).resolves.toBe(
+      'Refunds take 30 days.',
+    );
+  });
+
+  it('refuses a binary file renamed to .txt', async () => {
+    const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x33, 0x00, 0x01]);
+
+    await expect(extractText(asFile(pdfBytes, 'lied.txt'))).rejects.toThrow(/binary, not text/);
+  });
+
+  it('refuses a file whose contents are not the PDF it claims to be', async () => {
+    await expect(extractText(asFile('This is not a PDF at all.', 'lied.pdf'))).rejects.toThrow(
+      /not a PDF/,
+    );
+  });
+
+  it('refuses a file whose contents are not the DOCX it claims to be', async () => {
+    await expect(extractText(asFile('Not a zip.', 'lied.docx'))).rejects.toThrow(/not a DOCX/);
+  });
+
+  it('refuses an unsupported extension by name, before reading anything', async () => {
+    await expect(extractText(asFile('anything', 'notes.pages'))).rejects.toThrow(/not supported/);
+  });
+
+  it('refuses an empty text file rather than ingesting a blank document', async () => {
+    await expect(extractText(asFile('   \n  ', 'blank.txt'))).rejects.toThrow(/no text/);
   });
 });

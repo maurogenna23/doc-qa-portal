@@ -1,6 +1,6 @@
 'use client';
 
-import type { IngestDocumentInput, IngestResponse } from '@docqa/contracts';
+import { LIMITS, type IngestDocumentInput, type IngestResponse } from '@docqa/contracts';
 import { useId, useRef, useState, type DragEvent, type FormEvent } from 'react';
 import { ingestDocuments } from '@/lib/api';
 import {
@@ -41,7 +41,13 @@ function summarise(result: IngestResponse): string {
   if (result.status === 'queued') {
     return `Queued ${result.ingestedDocuments} document(s) for background ingest. Job ${result.jobId}.`;
   }
-  return `Ingested ${result.ingestedDocuments} document(s) into ${result.ingestedChunks} chunk(s).`;
+
+  const base = `Ingested ${result.ingestedDocuments} document(s) into ${result.ingestedChunks} chunk(s).`;
+  // Replacing is intended, but it destroys the previous version, so it is
+  // reported rather than folded into the same sentence as a first write.
+  return result.replacedDocuments > 0
+    ? `${base} ${result.replacedDocuments} replaced a document already in the index.`
+    : base;
 }
 
 export default function DocumentsPage() {
@@ -77,12 +83,26 @@ export default function DocumentsPage() {
     if (files === null || files.length === 0) return;
 
     setReading(true);
-    setFileProblems([]);
     setError(null);
     setResult(null);
 
+    // Refuse the surplus before parsing rather than after. Dropping thirty
+    // files used to parse all thirty and then fail at the API with a 413.
+    const room = LIMITS.maxDocumentsPerRequest - drafts.filter((d) => !isBlank(d)).length;
+    const selected = Array.from(files);
+    const accepted = room > 0 ? selected.slice(0, room) : [];
+    const rejected = selected.slice(accepted.length);
+
+    setFileProblems(
+      rejected.length === 0
+        ? []
+        : [
+            `${rejected.length} file(s) not read: a request may contain at most ${LIMITS.maxDocumentsPerRequest} documents. Ingest these first, then add the rest.`,
+          ],
+    );
+
     const outcomes = await Promise.all(
-      Array.from(files).map(async (file) => {
+      accepted.map(async (file) => {
         try {
           return { file, content: await extractText(file) };
         } catch (caught) {
@@ -120,7 +140,7 @@ export default function DocumentsPage() {
       const next = [...kept, ...added];
       return next.length > 0 ? next : [addCard()];
     });
-    setFileProblems(problems);
+    setFileProblems((current) => [...current, ...problems]);
     setReading(false);
     if (fileInput.current !== null) fileInput.current.value = '';
   }
@@ -152,6 +172,16 @@ export default function DocumentsPage() {
   }
 
   const incomplete = drafts.some(isBlank);
+
+  // Two cards with one id is not an error the API will accept, and it is easy
+  // to create by hand. Saying so here beats a 400 naming an array index.
+  const duplicateIds = [
+    ...new Set(
+      drafts
+        .map((draft) => draft.id.trim())
+        .filter((id, index, all) => id.length > 0 && all.indexOf(id) !== index),
+    ),
+  ];
 
   return (
     <>
@@ -267,8 +297,21 @@ export default function DocumentsPage() {
           </article>
         ))}
 
+        {duplicateIds.length > 0 && (
+          <div className="notice error" role="alert">
+            <strong>Two documents share an id</strong>
+            <ul>
+              {duplicateIds.map((id) => (
+                <li key={id}>
+                  <code>{id}</code> — only the last one would be kept. Give them different ids.
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="actions">
-          <button type="submit" disabled={pending || incomplete}>
+          <button type="submit" disabled={pending || incomplete || duplicateIds.length > 0}>
             {pending ? 'Ingesting…' : 'Ingest'}
           </button>
           <button type="button" className="secondary" onClick={() => setDrafts((c) => [...c, addCard()])}>

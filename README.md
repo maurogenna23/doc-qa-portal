@@ -75,8 +75,8 @@ services/api
   src/adapters          OpenAI, Pinecone, S3/SQS, logging
   src/handlers          Lambda entry points (ingest, ask, SQS worker)
   src/local             dev server that invokes the real handlers
-  test                  unit tests (144)
-apps/web/test         unit tests for the browser-side extraction (41)
+  test                  unit tests (145)
+apps/web/test         unit tests for the browser-side extraction (52)
 infra                   AWS CDK stack
 apps/web                Next.js app
 ```
@@ -89,7 +89,7 @@ implements those interfaces against real services.
 
 That boundary buys three concrete things:
 
-1. **The pipeline is testable without a network or an API key.** All 185 tests run
+1. **The pipeline is testable without a network or an API key.** All 197 tests run
    in under a second against in-memory doubles.
 2. **The SQS worker reuses the pipeline unchanged.** Async ingest changes *when*
    the work happens, not *what* the work is, so the bonus cost almost nothing.
@@ -275,12 +275,25 @@ curl -s http://localhost:4000/ask \
 }
 ```
 
-| Status | When |
-| --- | --- |
-| `400` | Malformed or invalid input; `details` names each offending field |
-| `413` | Too many documents, or a document over the size limit |
-| `502` | Pinecone or the LLM provider failed |
-| `500` | Missing configuration, or an unexpected error |
+| Status | When | Body |
+| --- | --- | --- |
+| `400` | Malformed or invalid input; `details` names each offending field | app contract |
+| `413` | Too many documents, or a document over the size limit | app contract |
+| `502` | Pinecone or the LLM provider failed | app contract |
+| `500` | Missing configuration, or an unexpected error | app contract |
+| `429`, `503` | API Gateway shed the request before it reached a Lambda | **not** the app contract |
+
+The last row is worth stating plainly, because it is the one case where a
+caller gets something this codebase did not write. Throttling and concurrency
+limits are enforced by API Gateway and Lambda, which reply in their own shape —
+`{"message":"Service Unavailable"}`, no `error.code`. Under a 60-request burst
+the deployed API returns a mix of `400` and `503`, and the `503` count tracks
+the account's concurrency limit rather than anything the app decided.
+
+The web client treats an unrecognised body as a failure and, for `429` and
+`503` specifically, tells the user the service is busy rather than showing a
+status code. A caller integrating directly should expect these two alongside
+the contract.
 
 `message` is always a string this codebase wrote. A third party's own text —
 the Pinecone SDK's rejection notice, an OpenAI error payload, a stack trace —
@@ -303,7 +316,7 @@ provider text is absent from the body, and that it is present in the log.
 npm test
 ```
 
-185 unit tests, all against in-memory doubles, so they need no credentials and
+197 unit tests, all against in-memory doubles, so they need no credentials and
 cost nothing to run. They cover:
 
 - **chunking** — determinism, sentence-boundary splitting, hard-splitting a
@@ -720,10 +733,30 @@ leaves the deployed architecture untouched. The parsers are dynamically
 imported, so their weight is only paid by someone who actually drops a file.
 
 Each file becomes its own editable card, with the id and title derived from the
-file name — `Refund Policy (2024).pdf` becomes `refund-policy-2024` and
+file name — `Refund Policy (2024).pdf` becomes `refund-policy-2024.pdf` and
 "Refund Policy (2024)", because the API only accepts letters, digits and
 `. _ : -`. Files are read in parallel and failures reported per file, so one
-unreadable document does not discard the four beside it.
+unreadable document does not discard the four beside it, and the batch is
+capped at the same document limit the API enforces rather than parsing thirty
+files to be told about it afterwards.
+
+**The extension is part of the derived id**, which looks like a cosmetic choice
+and is not. Re-using an id replaces that document: correct when a person picks
+the id, destructive when an app derives it. Without the extension,
+`report.pdf` today and `report.docx` tomorrow produce the same id and the
+second silently destroys the first. Including it keeps the property that
+matters — the same file re-uploaded still replaces itself — while two different
+files stop colliding over a shared stem. Two cards carrying the same id are
+flagged in the page before submission, and a synchronous ingest reports how
+many documents it replaced instead of reporting the same success as a first
+write.
+
+**Contents are checked against the extension, in both directions.** Dispatching
+on the extension alone was asymmetric: text renamed `.pdf` failed in the
+parser, but a PDF renamed `.txt` was read as text and would have put twelve
+thousand characters of binary into the index. Formats with a signature are
+checked against it, and the ones without are rejected if the first bytes
+contain a NUL, which plain text never does.
 
 **A scanned PDF is detected, not silently ingested.** Pages that are images
 carry no text layer, extraction yields nothing, and the user is told that

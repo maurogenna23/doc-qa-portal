@@ -121,6 +121,21 @@ describe('ingestDocuments', () => {
     expect(await store.listIdsByDocId('shipping')).toEqual(['shipping#chunk-1']);
   });
 
+  it('reports how many documents replaced one already in the store', async () => {
+    const store = new FakeVectorStore();
+    const first = { id: 'refund-policy', title: 'Refund Policy', content: LONG_POLICY };
+    const second = { id: 'shipping', title: 'Shipping Policy', content: SHORT_POLICY };
+
+    const initial = await ingestDocuments(deps(store), [first]);
+    expect(initial.replacedDocuments).toBe(0);
+
+    // Replacing destroys the previous version, so it is counted rather than
+    // reported as the same success as a first write.
+    const again = await ingestDocuments(deps(store), [first, second]);
+    expect(again.ingestedDocuments).toBe(2);
+    expect(again.replacedDocuments).toBe(1);
+  });
+
   it('does not delete anything when a document is ingested for the first time', async () => {
     const store = new FakeVectorStore();
 
