@@ -69,16 +69,18 @@ off the request path. See [Async ingest](#async-ingest) below.
 ## Project layout
 
 ```
-packages/contracts      request/response types shared by the web app and the API
+packages/contracts      request/response types and limits, shared by both sides
 services/api
   src/core              the RAG pipeline: chunking, validation, prompt, ingest, ask
   src/adapters          OpenAI, Pinecone, S3/SQS, logging
   src/handlers          Lambda entry points (ingest, ask, SQS worker)
   src/local             dev server that invokes the real handlers
+  src/scripts           Pinecone setup and the evaluation harness
   test                  unit tests (145)
-apps/web/test         unit tests for the browser-side extraction (52)
 infra                   AWS CDK stack
 apps/web                Next.js app
+  lib                   API client and browser-side file extraction
+  test                  unit tests for the extraction (52)
 ```
 
 The split between `core` and `adapters` is the main structural decision, and
@@ -89,8 +91,8 @@ implements those interfaces against real services.
 
 That boundary buys three concrete things:
 
-1. **The pipeline is testable without a network or an API key.** All 197 tests run
-   in under a second against in-memory doubles.
+1. **The pipeline is testable without a network or an API key.** All 145 backend
+   tests run in under a second against in-memory doubles.
 2. **The SQS worker reuses the pipeline unchanged.** Async ingest changes *when*
    the work happens, not *what* the work is, so the bonus cost almost nothing.
 3. **Swapping providers is a config change.** The OpenAI adapter takes a
@@ -316,8 +318,9 @@ provider text is absent from the body, and that it is present in the log.
 npm test
 ```
 
-197 unit tests, all against in-memory doubles, so they need no credentials and
-cost nothing to run. They cover:
+197 unit tests: 145 over the backend, against in-memory doubles, and 52 over
+the browser-side extraction, against pure functions and real `File` objects.
+None of them need credentials or cost anything to run. They cover:
 
 - **chunking** — determinism, sentence-boundary splitting, hard-splitting a
   sentence longer than a chunk, the overlap cap that guarantees forward
@@ -671,9 +674,9 @@ Measured over three runs each, same corpus and model:
 Both rows are measured on the same ten cases and the same corpus, changing only
 the prompt; the "before" row runs the pre-hardening prompt reconstructed from
 git. The suite also asserts, before it runs, that each injected payload survives
-prompt assembly intact — an earlier title payload was 145 characters against the
-120-character cap and was cut mid-phrase, so that case passed mechanically and
-measured nothing.
+prompt assembly intact — the suite's own title payload was once 145 characters
+against the 120-character cap and was cut mid-phrase, so that case passed
+mechanically and measured nothing.
 
 The hardening is four things:
 
@@ -870,10 +873,15 @@ scale.
 
 ## Assumptions
 
-- **Documents are plain text.** File upload and extraction is listed as a bonus;
-  this implementation does not do it.
-- **A document id is caller-supplied and stable.** It is the unit of replacement,
-  so ingesting the same id is understood as "replace this document".
+- **Documents end up as plain text.** `.pdf`, `.docx`, `.txt` and `.md` are read
+  in the browser and only their text is ingested; anything else has to be pasted
+  in. Scanned pages carry no text layer and are refused rather than ingested
+  empty.
+- **A document id is stable, and is the unit of replacement.** Ingesting the same
+  id is understood as "replace this document". The API takes the id from the
+  caller; the web app proposes one derived from the file name, including its
+  extension, and leaves it editable. That distinction matters more than it
+  looks — see [Reading files in the browser](#reading-files-in-the-browser).
 - **Ids are restricted** to letters, digits and `. _ : -`. `#` is reserved as the
   chunk separator; allowing it would make vector ids ambiguous.
 - **Single tenant.** There is no per-user isolation. `PINECONE_NAMESPACE` gives a
